@@ -50,8 +50,15 @@ async function runPipeline() {
 function startScheduler(cronExpression) {
   if (activeJob) { activeJob.stop(); activeJob = null; }
 
+  // Timezone matters for "peak hours" — without it, cron runs in the server's
+  // local time (UTC on most cloud hosts). Set SCHEDULE_TZ to your audience's
+  // timezone (e.g. "America/Toronto", "Asia/Kolkata", "America/New_York").
+  const timezone = process.env.SCHEDULE_TZ || undefined;
+  const options = timezone ? { timezone } : {};
+
   jobStatus.running  = true;
   jobStatus.schedule = cronExpression;
+  jobStatus.timezone = timezone || 'server local';
 
   activeJob = cron.schedule(cronExpression, async () => {
     try {
@@ -60,9 +67,9 @@ function startScheduler(cronExpression) {
       console.error('[Scheduler] Pipeline error:', err.message);
       jobStatus.lastResult = { success: false, error: err.message };
     }
-  });
+  }, options);
 
-  console.log(`[Scheduler] Started — schedule: ${cronExpression}`);
+  console.log(`[Scheduler] Started — schedule: ${cronExpression} (tz: ${jobStatus.timezone})`);
   return jobStatus;
 }
 

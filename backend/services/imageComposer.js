@@ -111,7 +111,7 @@ function logoSvg() {
       fill="rgba(0,0,0,0.55)" stroke="rgba(255,255,255,0.25)" stroke-width="1.5"/>
     <text x="${PAD + 145}" y="79"
       font-family="${FONT}" font-size="20" font-weight="900"
-      fill="${WHITE}" text-anchor="middle" letter-spacing="2">SYNTHETIC MINDS</text>`;
+      fill="${WHITE}" text-anchor="middle" letter-spacing="2">DEVELOPSCHL</text>`;
 }
 
 function socialBar() {
@@ -121,7 +121,7 @@ function socialBar() {
     <rect x="0" y="${H - 58}" width="${W}" height="1" fill="rgba(255,255,255,0.12)"/>
     <text x="${PAD}" y="${H - 20}"
       font-family="${FONT_B}" font-size="22" font-weight="600"
-      fill="rgba(255,255,255,0.55)" letter-spacing="1">@shadesofirony</text>
+      fill="rgba(255,255,255,0.55)" letter-spacing="1">@developschl</text>
     <text x="${W - PAD}" y="${H - 20}"
       font-family="${FONT_B}" font-size="22" font-weight="600"
       fill="${ACCENT}" text-anchor="end" letter-spacing="1">Follow for more →</text>`;
