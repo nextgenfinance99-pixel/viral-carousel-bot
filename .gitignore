@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# secrets — never commit
+.env
+.env.*
+!.env.example
+
+# generated slide images
+backend/temp/
+
+# runtime queue state
+backend/data/
+
+# build output
+frontend/dist/
+dist/
+
+# logs & OS junk
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# leftover empty extract folder (OneDrive lock)
+Twitter_Viral_post-main/
+
+# Claude Code local settings
+.claude/settings.local.json
