@@ -15,14 +15,36 @@ let jobStatus = {
   totalPosted: 0,
 };
 
+// Trending AI topics the auto-poster rotates through (matches the guide).
+const AI_TOPICS = [
+  'OpenAI', 'Anthropic', 'Google AI', 'NVIDIA', 'AI funding', 'AI layoffs',
+  'artificial intelligence', 'Meta AI', 'AI startup', 'AI regulation',
+];
+
 async function runPipeline() {
   jobStatus.lastRun = new Date().toISOString();
 
-  console.log('[Pipeline] Fetching top trending story from HN front page...');
-
-  // Always use HN trending — most viral story right now
-  const article = await fetchTrendingArticle();
-  console.log(`[Pipeline] Trending: "${article.title}" (${article.points} pts)`);
+  // Primary path: topic-based RSS scrape (reliable on cloud hosts — no headless
+  // browser needed). Falls back to HN trending only if every topic comes up empty.
+  const topics = [...AI_TOPICS].sort(() => Math.random() - 0.5);
+  let article = null;
+  for (const topic of topics.slice(0, 4)) {
+    try {
+      console.log(`[Pipeline] Trying topic: ${topic}`);
+      const a = await fetchNewsArticle(topic);
+      if (a && a.fullText && a.fullText.length > 200) { article = a; break; }
+    } catch (e) {
+      console.log(`[Pipeline] topic "${topic}" failed: ${e.message}`);
+    }
+  }
+  if (!article) {
+    console.log('[Pipeline] All topics empty — falling back to HN trending...');
+    try { article = await fetchTrendingArticle(); } catch (e) {
+      console.log(`[Pipeline] HN trending also failed: ${e.message}`);
+    }
+  }
+  if (!article) throw new Error('No article found from topics or HN trending');
+  console.log(`[Pipeline] Using: "${article.title}" (${article.source})`);
 
   const { slides, caption } = await generateCarouselSlides(article, article.title);
   console.log(`[Pipeline] Generated ${slides.length} slides`);
