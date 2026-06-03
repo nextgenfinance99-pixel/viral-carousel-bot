@@ -5,6 +5,8 @@ node_modules/
 .env
 .env.*
 !.env.example
+# public (non-secret) build config — safe to commit
+!frontend/.env.production
 
 # generated slide images
 backend/temp/
