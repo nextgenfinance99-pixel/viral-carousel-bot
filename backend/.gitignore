@@ -3,3 +3,9 @@ node_modules
 temp/
 posted-history.json
 scheduler-state.json
+
+# Uploaded host/avatar images — kept out of the public repo (live on the Render disk)
+assets/avatars/*.png
+assets/avatars/*.jpg
+assets/avatars/*.jpeg
+assets/avatars/*.webp

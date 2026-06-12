@@ -1,0 +1,11 @@
+node_modules
+npm-debug.log
+.env
+.env.*
+temp
+data
+assets/avatars/*.png
+assets/avatars/*.jpg
+assets/avatars/*.jpeg
+assets/avatars/*.webp
+*.log

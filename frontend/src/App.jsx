@@ -2,6 +2,11 @@ import { useState, useEffect, useRef } from 'react';
 import {
   fetchNews,
   generateSlides,
+  generateReel,
+  uploadReelAsset,
+  getReelAssets,
+  getReelIntro,
+  saveReelIntro,
   generateCustomSlides,
   postCarousel,
   runPipeline,
@@ -12,6 +17,11 @@ import {
   getQueue,
   addToQueue,
   removeFromQueue,
+  getDailyStatus,
+  ingestTools,
+  generateDaily,
+  approveAsset,
+  publishAsset,
 } from './api';
 import './App.css';
 
@@ -35,7 +45,19 @@ export default function App() {
   const [caption, setCaption]       = useState('');
   const [imageUrls, setImageUrls]   = useState([]);
   const [imagePaths, setImagePaths] = useState([]);
-  const [loading, setLoading]       = useState({ news: false, generate: false, post: false, pipeline: false });
+  const [loading, setLoading]       = useState({ news: false, generate: false, post: false, pipeline: false, reel: false });
+
+  // Reel generator state
+  const [reelMode, setReelMode]     = useState('tool'); // 'tool' | 'topic' | 'trending'
+  const [reelTool, setReelTool]     = useState({ name: '', tagline: '', description: '', url: '' });
+  const [reelTopic, setReelTopic]   = useState('');
+  const [reelHost, setReelHost]     = useState('auto'); // auto | girl | boy | none
+  const [reelResult, setReelResult] = useState(null);
+  const [reelAssets, setReelAssets] = useState({ host: false, boy: false, girl: false });
+  const [introCfg, setIntroCfg]     = useState({ enabled: true, text: 'AI TOOL OF THE DAY', narration: '' });
+  const [introSaved, setIntroSaved] = useState(false);
+  const [uploadingSlot, setUploadingSlot] = useState(null);
+  const hostFileRef = useRef(null);
   const [error, setError]           = useState(null);
   const [posted, setPosted]         = useState(null);
   const [activeTab, setActiveTab]   = useState('manual');
@@ -55,6 +77,11 @@ export default function App() {
   const [schedulerStatus, setSchedulerStatus] = useState(null);
   const [cronExpression, setCronExpression]   = useState('0 9 * * *');
 
+  // Daily 100-day challenge state
+  const [daily, setDaily]             = useState(null); // { challenge, draft, generating, capabilities }
+  const [dailyBusy, setDailyBusy]     = useState(false);
+  const [publishing, setPublishing]   = useState(null); // assetId currently posting
+
   useEffect(() => {
     fetchStatus();
     loadTrending();
@@ -62,6 +89,51 @@ export default function App() {
     const interval = setInterval(() => { fetchStatus(); loadQueue(); }, 10000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (activeTab === 'reel') loadReelMeta();
+    if (activeTab === 'daily') loadDaily();
+  }, [activeTab]);
+
+  // Poll daily status while a generation is running (or the tab is open).
+  useEffect(() => {
+    if (activeTab !== 'daily') return;
+    const t = setInterval(loadDaily, 8000);
+    return () => clearInterval(t);
+  }, [activeTab]);
+
+  async function loadDaily() {
+    try { setDaily(await getDailyStatus()); } catch {}
+  }
+  async function handleIngestTools() {
+    setDailyBusy(true); setError(null);
+    try { const r = await ingestTools(); await loadDaily(); alert(`Tool store refreshed: +${r.added} new (${r.total} total).`); }
+    catch (e) { setError(e?.response?.data?.error || e.message); }
+    finally { setDailyBusy(false); }
+  }
+  async function handleGenerateDaily(force) {
+    setDailyBusy(true); setError(null);
+    try { await generateDaily({ force }); await loadDaily(); }
+    catch (e) { setError(e?.response?.data?.error || e.message); }
+    finally { setDailyBusy(false); }
+  }
+  async function handleApprove(assetId, approved) {
+    if (!daily?.draft) return;
+    try { await approveAsset(daily.draft.dateKey, assetId, approved); await loadDaily(); }
+    catch (e) { setError(e?.response?.data?.error || e.message); }
+  }
+  async function handlePublish(assetId, targets) {
+    if (!daily?.draft) return;
+    setPublishing(assetId); setError(null);
+    try {
+      const r = await publishAsset(daily.draft.dateKey, assetId, targets);
+      await loadDaily();
+      const ok = Object.entries(r.results || {}).filter(([, v]) => v.ok).map(([k]) => k);
+      const fail = Object.entries(r.results || {}).filter(([, v]) => !v.ok);
+      alert(ok.length ? `Posted to: ${ok.join(', ')}` : `Failed: ${fail.map(([k, v]) => `${k} — ${v.error}`).join('; ')}`);
+    } catch (e) { setError(e?.response?.data?.error || e.message); }
+    finally { setPublishing(null); }
+  }
 
   async function loadQueue() {
     try { setPostQueue(await getQueue()); } catch {}
@@ -130,6 +202,63 @@ export default function App() {
       setError(e.response?.data?.error || e.message);
     } finally {
       setLoad('post', false);
+    }
+  }
+
+  async function handleGenerateReel() {
+    setError(null);
+    setReelResult(null);
+    let payload = { host: reelHost };
+    if (reelMode === 'tool') {
+      if (!reelTool.name.trim()) return setError('Enter the AI tool name');
+      payload.tool = reelTool;
+    } else if (reelMode === 'topic') {
+      if (!reelTopic.trim()) return setError('Enter a topic to scan');
+      payload.topic = reelTopic;
+    } else {
+      payload.trending = true;
+    }
+    setLoad('reel', true);
+    try {
+      const result = await generateReel(payload);
+      setReelResult(result);
+    } catch (e) {
+      setError(e.response?.data?.error || e.message);
+    } finally {
+      setLoad('reel', false);
+    }
+  }
+
+  async function loadReelMeta() {
+    try { setReelAssets(await getReelAssets()); } catch {}
+    try {
+      const cfg = await getReelIntro();
+      setIntroCfg((p) => ({ ...p, ...cfg }));
+    } catch {}
+  }
+
+  async function handleUploadAsset(slot, file) {
+    if (!file) return;
+    setError(null);
+    setUploadingSlot(slot);
+    try {
+      await uploadReelAsset(slot, file);
+      await loadReelMeta();
+    } catch (e) {
+      setError(e.response?.data?.error || e.message);
+    } finally {
+      setUploadingSlot(null);
+    }
+  }
+
+  async function handleSaveIntro() {
+    setError(null);
+    try {
+      await saveReelIntro(introCfg);
+      setIntroSaved(true);
+      setTimeout(() => setIntroSaved(false), 3000);
+    } catch (e) {
+      setError(e.response?.data?.error || e.message);
     }
   }
 
@@ -202,6 +331,12 @@ export default function App() {
     reader.readAsDataURL(file);
   }
 
+  const inputStyle = {
+    width: '100%', padding: '0.6rem 0.8rem', background: 'var(--bg3)',
+    border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text)',
+    fontFamily: 'var(--mono)', fontSize: '0.85rem',
+  };
+
   // Step states
   const step1Done   = !!article;
   const step2Done   = slides.length > 0;
@@ -234,6 +369,12 @@ export default function App() {
           </button>
           <button className={activeTab === 'custom' ? 'tab active' : 'tab'} onClick={() => setActiveTab('custom')}>
             CREATE YOUR OWN
+          </button>
+          <button className={activeTab === 'reel' ? 'tab active' : 'tab'} onClick={() => setActiveTab('reel')}>
+            🎬 REEL
+          </button>
+          <button className={activeTab === 'daily' ? 'tab active' : 'tab'} onClick={() => setActiveTab('daily')}>
+            📅 DAILY
           </button>
           <button className={activeTab === 'auto' ? 'tab active' : 'tab'} onClick={() => setActiveTab('auto')}>
             AUTO SCHEDULER
@@ -668,6 +809,370 @@ export default function App() {
               </div>
             )}
 
+          </div>
+        )}
+
+        {/* ── REEL GENERATOR ── */}
+        {activeTab === 'reel' && (
+          <div className="workflow">
+
+            {/* INTRO & HOST SETUP */}
+            <div className="panel" style={{ marginBottom: '1.2rem' }}>
+              <div className="slides-label">🎭 INTRO &amp; HOST SETUP</div>
+
+              {/* Upload slots */}
+              <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.7rem' }}>
+                {[
+                  { slot: 'host', label: 'Intro Host', hint: 'opens every reel' },
+                  { slot: 'girl', label: 'Girl (corner)', hint: 'female voice' },
+                  { slot: 'boy', label: 'Boy (corner)', hint: 'male voice' },
+                ].map(({ slot, label, hint }) => (
+                  <label key={slot} style={{
+                    flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.2rem',
+                    padding: '0.8rem 0.4rem', textAlign: 'center', cursor: uploadingSlot ? 'wait' : 'pointer',
+                    border: `2px dashed ${reelAssets[slot] ? 'var(--green)' : 'var(--border)'}`,
+                    background: 'var(--bg3)', borderRadius: '8px', transition: 'border-color 0.2s',
+                  }}>
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: '0.78rem', fontWeight: 700, color: reelAssets[slot] ? 'var(--green)' : 'var(--cyan)' }}>
+                      {uploadingSlot === slot ? '⏳ ...' : reelAssets[slot] ? '✓ ' + label : '↑ ' + label}
+                    </span>
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: '0.62rem', color: 'var(--text-mute)' }}>{hint}</span>
+                    <input type="file" accept="image/*" style={{ display: 'none' }}
+                      onChange={(e) => handleUploadAsset(slot, e.target.files[0])} />
+                  </label>
+                ))}
+              </div>
+
+              {/* Intro config */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', margin: '1rem 0 0.6rem' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontFamily: 'var(--mono)', fontSize: '0.75rem', color: 'var(--text-dim)', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={introCfg.enabled}
+                    onChange={(e) => setIntroCfg({ ...introCfg, enabled: e.target.checked })} />
+                  INTRO STING ENABLED
+                </label>
+              </div>
+              <div className="field">
+                <label>INTRO TITLE <span style={{ color: 'var(--text-mute)', fontWeight: 400 }}>(on-screen)</span></label>
+                <input type="text" value={introCfg.text}
+                  onChange={(e) => setIntroCfg({ ...introCfg, text: e.target.value })} style={inputStyle} />
+              </div>
+              <div className="field">
+                <label>INTRO SCRIPT <span style={{ color: 'var(--text-mute)', fontWeight: 400 }}>(spoken every reel)</span></label>
+                <textarea rows={2} value={introCfg.narration}
+                  placeholder="What's up, here is your AI tool of the day."
+                  onChange={(e) => setIntroCfg({ ...introCfg, narration: e.target.value })}
+                  style={{ ...inputStyle, resize: 'vertical' }} />
+              </div>
+              <button className="btn btn-cyan" onClick={handleSaveIntro} style={{ marginTop: '0.5rem' }}>
+                {introSaved ? '✓ SAVED' : '💾 SAVE INTRO'}
+              </button>
+              {!reelAssets.host && (
+                <div style={{ fontFamily: 'var(--mono)', fontSize: '0.68rem', color: 'var(--text-mute)', marginTop: '0.5rem' }}>
+                  Upload an "Intro Host" image to enable the opening sting. Without it, reels start faceless.
+                </div>
+              )}
+            </div>
+
+            {/* INPUT */}
+            <div className={`step ${reelResult ? 'done' : 'active'}`}>
+              <div className="step-connector">
+                <div className="step-num">{reelResult ? '✓' : '01'}</div>
+                <div className="step-line" />
+              </div>
+              <div className="step-body">
+                <div className="step-header">
+                  <span className="step-label">REEL SOURCE</span>
+                  <span className="step-tag">{reelResult ? 'COMPLETE' : 'PENDING'}</span>
+                </div>
+                <div className="panel" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+
+                  {/* Source mode toggle */}
+                  <div style={{ display: 'flex', gap: '0.6rem' }}>
+                    {[
+                      { k: 'tool', label: '🛠 AI Tool' },
+                      { k: 'topic', label: '🔎 Topic' },
+                      { k: 'trending', label: '⚡ Trending' },
+                    ].map(({ k, label }) => (
+                      <button key={k} onClick={() => setReelMode(k)}
+                        style={{
+                          flex: 1, padding: '0.55rem', fontFamily: 'var(--mono)', fontSize: '0.75rem',
+                          fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase',
+                          border: `1px solid ${reelMode === k ? 'var(--cyan)' : 'var(--border)'}`,
+                          background: reelMode === k ? 'rgba(0,229,255,0.1)' : 'var(--bg3)',
+                          color: reelMode === k ? 'var(--cyan)' : 'var(--text-dim)',
+                          borderRadius: '6px', cursor: 'pointer', transition: 'all 0.15s',
+                        }}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {reelMode === 'tool' && (
+                    <>
+                      <div className="field">
+                        <label>TOOL NAME</label>
+                        <input type="text" placeholder="e.g. Ollama, Whisper, ComfyUI..."
+                          value={reelTool.name}
+                          onChange={(e) => setReelTool({ ...reelTool, name: e.target.value })}
+                          style={inputStyle} />
+                      </div>
+                      <div className="field">
+                        <label>TAGLINE <span style={{ color: 'var(--text-mute)', fontWeight: 400 }}>(one line)</span></label>
+                        <input type="text" placeholder="Open-source X that does Y for free"
+                          value={reelTool.tagline}
+                          onChange={(e) => setReelTool({ ...reelTool, tagline: e.target.value })}
+                          style={inputStyle} />
+                      </div>
+                      <div className="field">
+                        <label>WHAT IT DOES</label>
+                        <textarea placeholder="A few sentences on what the tool does and why it's useful..."
+                          value={reelTool.description} rows={4}
+                          onChange={(e) => setReelTool({ ...reelTool, description: e.target.value })}
+                          style={{ ...inputStyle, resize: 'vertical' }} />
+                      </div>
+                      <div className="field">
+                        <label>LINK <span style={{ color: 'var(--text-mute)', fontWeight: 400 }}>(optional)</span></label>
+                        <input type="text" placeholder="https://..."
+                          value={reelTool.url}
+                          onChange={(e) => setReelTool({ ...reelTool, url: e.target.value })}
+                          style={inputStyle} />
+                      </div>
+                    </>
+                  )}
+
+                  {reelMode === 'topic' && (
+                    <div className="field">
+                      <label>TOPIC TO SCAN</label>
+                      <input type="text" placeholder="video generation / ai agents / open source llm..."
+                        value={reelTopic}
+                        onChange={(e) => setReelTopic(e.target.value)}
+                        style={inputStyle} />
+                    </div>
+                  )}
+
+                  {reelMode === 'trending' && (
+                    <div style={{ fontFamily: 'var(--mono)', fontSize: '0.78rem', color: 'var(--text-dim)' }}>
+                      &gt; Auto-picks the top trending AI/tech story and turns it into a reel.
+                    </div>
+                  )}
+
+                  {/* Host avatar selector */}
+                  <div className="field">
+                    <label>HOST AVATAR</label>
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      {[
+                        { k: 'auto', label: 'Auto' },
+                        { k: 'girl', label: '👩 Girl' },
+                        { k: 'boy', label: '👨 Boy' },
+                        { k: 'none', label: 'Faceless' },
+                      ].map(({ k, label }) => (
+                        <button key={k} onClick={() => setReelHost(k)}
+                          style={{
+                            flex: 1, padding: '0.45rem', fontFamily: 'var(--mono)', fontSize: '0.72rem',
+                            fontWeight: 700, border: `1px solid ${reelHost === k ? 'var(--cyan)' : 'var(--border)'}`,
+                            background: reelHost === k ? 'rgba(0,229,255,0.1)' : 'var(--bg3)',
+                            color: reelHost === k ? 'var(--cyan)' : 'var(--text-dim)',
+                            borderRadius: '6px', cursor: 'pointer', transition: 'all 0.15s',
+                          }}>
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: '0.68rem', color: 'var(--text-mute)', marginTop: '0.3rem', display: 'block' }}>
+                      Auto matches the voice gender. Add images at backend/assets/avatars/.
+                    </span>
+                  </div>
+
+                  <button className="btn btn-cyan" onClick={handleGenerateReel} disabled={loading.reel}>
+                    {loading.reel ? '🎬 GENERATING REEL — ~30s...' : '🎬 GENERATE REEL'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* PREVIEW */}
+            {reelResult && (
+              <div className="step done">
+                <div className="step-connector">
+                  <div className="step-num">✓</div>
+                  <div className="step-line" style={{ minHeight: 0, flex: 0 }} />
+                </div>
+                <div className="step-body">
+                  <div className="step-header">
+                    <span className="step-label">REEL PREVIEW — {reelResult.durationSec}s</span>
+                    <span className="step-tag">READY</span>
+                  </div>
+                  <div className="panel" style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
+
+                    {/* Video player */}
+                    <div style={{ flex: '0 0 auto' }}>
+                      <video
+                        src={`${IMG_BASE}${reelResult.videoUrl}`}
+                        controls autoPlay loop muted playsInline
+                        style={{ width: '280px', aspectRatio: '9 / 16', borderRadius: '10px', background: '#000', border: '1px solid var(--border)' }}
+                      />
+                      <a href={`${IMG_BASE}${reelResult.videoUrl}`} download
+                        className="btn btn-cyan btn-full" style={{ marginTop: '0.6rem', textAlign: 'center', textDecoration: 'none', display: 'block' }}>
+                        ⬇ DOWNLOAD MP4
+                      </a>
+                    </div>
+
+                    {/* Script + caption */}
+                    <div style={{ flex: 1, minWidth: '240px', display: 'flex', flexDirection: 'column', gap: '0.9rem' }}>
+                      <div>
+                        <div className="slides-label">SCRIPT — {reelResult.script.beats.length} BEATS · {reelResult.script.voice} · 🎵 {reelResult.script.music}</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.5rem' }}>
+                          {reelResult.script.beats.map((b, i) => (
+                            <div key={i} style={{ padding: '0.5rem 0.7rem', background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: '6px' }}>
+                              <div style={{ fontFamily: 'var(--mono)', fontSize: '0.7rem', color: 'var(--cyan)', fontWeight: 700, letterSpacing: '1px' }}>
+                                {String(i + 1).padStart(2, '0')} · {b.onscreen}
+                              </div>
+                              <div style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.2rem', lineHeight: 1.35 }}>
+                                {b.narration}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="caption-section">
+                        <span className="caption-label">CAPTION</span>
+                        <textarea readOnly value={reelResult.script.caption} rows={5}
+                          onFocus={(e) => e.target.select()} />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+          </div>
+        )}
+
+        {/* ── DAILY 100-DAY CHALLENGE ── */}
+        {activeTab === 'daily' && (
+          <div className="panel">
+            {/* Header: day counter + capabilities */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem', marginBottom: '0.9rem' }}>
+              <div>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: '1.5rem', fontWeight: 900, color: 'var(--cyan)' }}>
+                  DAY {daily?.challenge?.day ?? 0} <span style={{ opacity: 0.5, fontSize: '1rem' }}>/ {daily?.challenge?.length ?? 100}</span>
+                </div>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: '0.7rem', letterSpacing: '2px', opacity: 0.7 }}>
+                  AI TOOLS CHALLENGE · 5 tools / day
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '0.4rem', fontSize: '0.65rem', fontFamily: 'var(--mono)' }}>
+                <span style={{ padding: '0.2rem 0.5rem', borderRadius: 4, background: daily?.capabilities?.instagram ? 'rgba(0,229,255,0.15)' : 'rgba(255,255,255,0.06)' }}>
+                  IG {daily?.capabilities?.instagram ? '✓' : '—'}
+                </span>
+                <span style={{ padding: '0.2rem 0.5rem', borderRadius: 4, background: daily?.capabilities?.youtube ? 'rgba(0,229,255,0.15)' : 'rgba(255,255,255,0.06)' }}>
+                  YT {daily?.capabilities?.youtube ? '✓' : '—'}
+                </span>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.9rem' }}>
+              <button className="btn btn-cyan" onClick={handleIngestTools} disabled={dailyBusy}>
+                {dailyBusy ? '...' : '↻ REFRESH TOOLS'}
+              </button>
+              <button className="btn btn-green" onClick={() => handleGenerateDaily(false)} disabled={dailyBusy || daily?.generating?.active}>
+                {daily?.generating?.active ? '⏳ GENERATING…' : '⚡ GENERATE TODAY'}
+              </button>
+              {daily?.draft && (
+                <button className="btn btn-cyan" onClick={() => handleGenerateDaily(true)} disabled={dailyBusy || daily?.generating?.active}
+                  style={{ opacity: 0.8 }}>
+                  ↺ REBUILD
+                </button>
+              )}
+            </div>
+
+            {daily?.generating?.active && (
+              <div className="status-box status-active" style={{ marginBottom: '0.9rem' }}>
+                <div className="status-row"><span className="s-key">STATUS</span><span className="s-val">🟢 Building today's bundle… (renders take a few minutes — assets appear as they finish)</span></div>
+              </div>
+            )}
+            {daily?.generating?.lastError && (
+              <div className="error-banner">⚠ Last run: {daily.generating.lastError}</div>
+            )}
+
+            {/* Today's picked tools */}
+            {daily?.draft?.tools?.length > 0 && (
+              <div style={{ marginBottom: '1rem' }}>
+                <span className="step-label">TODAY'S 5 TOOLS</span>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginTop: '0.5rem' }}>
+                  {daily.draft.tools.map((t, i) => (
+                    <a key={i} href={t.url} target="_blank" rel="noreferrer"
+                      style={{ padding: '0.3rem 0.6rem', borderRadius: 6, background: 'rgba(0,229,255,0.1)', border: '1px solid rgba(0,229,255,0.25)', fontSize: '0.75rem', textDecoration: 'none', color: 'inherit' }}>
+                      <b>{i + 1}. {t.name}</b> <span style={{ opacity: 0.6 }}>· {t.category}{t.isNew ? ' · NEW' : ''}</span>
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Asset cards */}
+            {daily?.draft?.assets?.length > 0 ? (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '0.9rem' }}>
+                {daily.draft.assets.map((a) => (
+                  <div key={a.id} style={{ border: '1px solid var(--border, rgba(255,255,255,0.12))', borderRadius: 10, padding: '0.7rem', background: 'rgba(255,255,255,0.02)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                      <span style={{ fontSize: '0.62rem', fontFamily: 'var(--mono)', letterSpacing: '1px', color: 'var(--cyan)' }}>
+                        {a.kind === 'rundown' ? '👧 RUNDOWN' : a.kind === 'howto' ? '👦 HOW-TO' : '📰 UPDATE'}
+                      </span>
+                      <span style={{ fontSize: '0.6rem', opacity: 0.6 }}>{a.durationSec ? `${a.durationSec}s` : ''}</span>
+                    </div>
+                    <div style={{ fontSize: '0.8rem', fontWeight: 700, marginBottom: '0.5rem', minHeight: '2.2em' }}>{a.title}</div>
+
+                    {a.status === 'ready' && a.videoUrl ? (
+                      <video src={`${IMG_BASE}${a.videoUrl}`} controls style={{ width: '100%', borderRadius: 8, aspectRatio: '9/16', background: '#000', objectFit: 'cover' }} />
+                    ) : a.status === 'error' ? (
+                      <div style={{ fontSize: '0.7rem', color: 'var(--red, #ff6b6b)', padding: '0.5rem 0' }}>⚠ {a.error}</div>
+                    ) : (
+                      <div style={{ fontSize: '0.7rem', opacity: 0.6, padding: '0.5rem 0' }}>⏳ {a.status}…</div>
+                    )}
+
+                    {a.status === 'ready' && (
+                      <>
+                        <details style={{ marginTop: '0.5rem' }}>
+                          <summary style={{ fontSize: '0.65rem', cursor: 'pointer', opacity: 0.8 }}>CAPTION</summary>
+                          <textarea readOnly value={a.caption || ''} rows={4} onFocus={(e) => e.target.select()}
+                            style={{ width: '100%', marginTop: '0.3rem', fontSize: '0.7rem' }} />
+                        </details>
+                        <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap', marginTop: '0.5rem', alignItems: 'center' }}>
+                          <a className="btn btn-cyan" href={`${IMG_BASE}${a.videoUrl}`} download
+                            style={{ padding: '0.25rem 0.55rem', fontSize: '0.65rem' }}>⬇ MP4</a>
+                          <button className="btn" onClick={() => handleApprove(a.id, !a.approved)}
+                            style={{ padding: '0.25rem 0.55rem', fontSize: '0.65rem', background: a.approved ? 'var(--green, #2ecc71)' : 'rgba(255,255,255,0.08)', color: a.approved ? '#000' : 'inherit' }}>
+                            {a.approved ? '✓ APPROVED' : 'APPROVE'}
+                          </button>
+                        </div>
+                        {a.approved && (
+                          <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap', marginTop: '0.4rem' }}>
+                            <button className="btn btn-green" disabled={publishing === a.id || !daily?.capabilities?.instagram}
+                              onClick={() => handlePublish(a.id, ['instagram'])}
+                              style={{ padding: '0.25rem 0.55rem', fontSize: '0.65rem' }}>
+                              {publishing === a.id ? '…' : '▶ IG'}
+                            </button>
+                            <button className="btn btn-green" disabled={publishing === a.id || !daily?.capabilities?.youtube}
+                              onClick={() => handlePublish(a.id, ['youtube'])}
+                              style={{ padding: '0.25rem 0.55rem', fontSize: '0.65rem' }}>
+                              {publishing === a.id ? '…' : '▶ YT'}
+                            </button>
+                          </div>
+                        )}
+                        {a.posted && <div style={{ fontSize: '0.62rem', color: 'var(--green, #2ecc71)', marginTop: '0.35rem' }}>✓ posted: {(a.postedTo || []).join(', ')}</div>}
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : !daily?.generating?.active && (
+              <div style={{ opacity: 0.6, fontSize: '0.85rem', padding: '1rem 0' }}>
+                No draft yet for today. Hit <b>REFRESH TOOLS</b> to pull the latest launches, then <b>GENERATE TODAY</b> to build the 5-tool rundown, 3 how-to reels, and 2 update posts.
+              </div>
+            )}
           </div>
         )}
 

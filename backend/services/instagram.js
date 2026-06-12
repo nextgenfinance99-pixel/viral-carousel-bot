@@ -96,4 +96,47 @@ async function postCarousel(imagePaths, caption) {
   return postId;
 }
 
-module.exports = { postCarousel };
+// Upload any file (incl. mp4) to catbox.moe — IG needs a public URL to fetch.
+async function uploadFileToHost(filepath) {
+  const form = new FormData();
+  form.append('reqtype', 'fileupload');
+  form.append('fileToUpload', fs.createReadStream(filepath));
+  const res = await axios.post('https://catbox.moe/user/api.php', form, {
+    headers: form.getHeaders(), timeout: 120000, maxBodyLength: Infinity, maxContentLength: Infinity,
+  });
+  const url = res.data.trim();
+  console.log(`[Instagram] Uploaded file → ${url}`);
+  return url;
+}
+
+// Post a single vertical video as a Reel. IG processes the video async, so we
+// create the REELS container, poll until it's FINISHED, then publish.
+async function postReel(videoPath, caption) {
+  const { accessToken, userId } = getCredentials();
+  const videoUrl = await uploadFileToHost(videoPath);
+
+  console.log('[Instagram] Creating REELS container...');
+  const create = await axios.post(`${BASE_URL}/${userId}/media`, null, {
+    params: { media_type: 'REELS', video_url: videoUrl, caption, access_token: accessToken },
+  });
+  const containerId = create.data.id;
+
+  // Poll container status (video transcode can take a while)
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 5000));
+    const st = await axios.get(`${BASE_URL}/${containerId}`, {
+      params: { fields: 'status_code,status', access_token: accessToken },
+    });
+    const code = st.data.status_code;
+    console.log(`[Instagram] Reel container status: ${code}`);
+    if (code === 'FINISHED') break;
+    if (code === 'ERROR') throw new Error(`Reel processing failed: ${st.data.status || ''}`);
+    if (i === 29) throw new Error('Reel processing timed out');
+  }
+
+  const postId = await publishMedia(containerId);
+  console.log(`[Instagram] Published Reel: ${postId}`);
+  return postId;
+}
+
+module.exports = { postCarousel, postReel };

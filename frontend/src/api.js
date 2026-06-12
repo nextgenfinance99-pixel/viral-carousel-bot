@@ -18,6 +18,23 @@ export const generateCustomSlides = (title, body, imageFile) => {
 export const generateSlides = (article, topic) =>
   api.post('/generate', { article, topic }).then((r) => r.data);
 
+// Reel generator — payload is one of { tool }, { topic }, { trending: true }
+// plus optional host: 'auto' | 'boy' | 'girl' | 'none'
+export const generateReel = (payload) =>
+  api.post('/reel/generate', payload, { timeout: 180000 }).then((r) => r.data);
+
+// Upload a host/avatar image. slot: 'host' | 'boy' | 'girl'
+export const uploadReelAsset = (slot, imageFile) => {
+  const form = new FormData();
+  form.append('slot', slot);
+  form.append('image', imageFile);
+  return api.post('/reel/asset', form, { headers: { 'Content-Type': 'multipart/form-data' } }).then((r) => r.data);
+};
+
+export const getReelAssets = ()        => api.get('/reel/assets').then((r) => r.data);
+export const getReelIntro  = ()        => api.get('/reel/intro').then((r) => r.data);
+export const saveReelIntro = (payload) => api.post('/reel/intro', payload).then((r) => r.data);
+
 export const postCarousel = (imagePaths, caption, articleUrl) =>
   api.post('/instagram/carousel', { imagePaths, caption, articleUrl }).then((r) => r.data);
 
@@ -39,3 +56,13 @@ export const getSchedulerStatus = () =>
 
 export const getTrending = () =>
   api.get('/trending').then((r) => r.data.stories);
+
+// ── Daily AI-tools challenge ──────────────────────────────────────────────────
+export const getDailyStatus = ()        => api.get('/daily/status').then((r) => r.data);
+export const getDailyDraft   = (date)    => api.get('/daily/draft', { params: { date } }).then((r) => r.data);
+export const ingestTools     = ()        => api.post('/daily/ingest').then((r) => r.data);
+export const generateDaily   = (payload) => api.post('/daily/generate', payload || {}).then((r) => r.data);
+export const approveAsset    = (date, assetId, approved) =>
+  api.post('/daily/approve', { date, assetId, approved }).then((r) => r.data);
+export const publishAsset    = (date, assetId, targets) =>
+  api.post('/daily/publish', { date, assetId, targets }, { timeout: 600000 }).then((r) => r.data);

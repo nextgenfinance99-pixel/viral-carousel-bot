@@ -1,12 +1,29 @@
 services:
   - type: web
     name: carousel-automator-backend
-    runtime: node
+    runtime: docker
     rootDir: backend
-    buildCommand: npm install
-    startCommand: node server.js
+    dockerfilePath: ./Dockerfile
+    plan: starter          # ffmpeg reel rendering needs real CPU/RAM (free tier OOMs + sleeps)
+    healthCheckPath: /api/health
+    autoDeploy: true
+    # Persistent disk keeps your host/avatar images, intro config, drafts and
+    # rendered videos across restarts/redeploys (symlinked by docker-entrypoint.sh).
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 2
     envVars:
-      # Render injects its own PORT — do NOT hardcode it (the code reads process.env.PORT).
+      - key: PERSIST_DIR
+        value: /var/data
+      # ── Daily review-only pipeline (NO auto-posting; you approve in Telegram) ──
+      - key: DAILY_AUTOGEN
+        value: "true"
+      - key: DAILY_CRON
+        value: "0 6 * * *"        # 6am — adjust to taste
+      - key: SCHEDULE_TZ
+        value: Asia/Kolkata       # CHANGE to your timezone (e.g. America/New_York)
+      # ── Secrets — set these in the Render dashboard (sync:false = not in git) ──
       - key: GROQ_API_KEY
         sync: false
       - key: HF_API_KEY
@@ -15,10 +32,7 @@ services:
         sync: false
       - key: INSTAGRAM_USER_ID
         sync: false
-      # Auto-posting: ON in the cloud, twice daily at peak hours (US Eastern).
-      - key: AUTO_START
-        value: "true"
-      - key: SCHEDULE_TZ
-        value: America/New_York
-      - key: DEFAULT_CRON
-        value: "0 12,19 * * *"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
