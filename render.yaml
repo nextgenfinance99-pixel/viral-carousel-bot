@@ -22,7 +22,7 @@ services:
       - key: DAILY_CRON
         value: "0 6 * * *"        # 6am — adjust to taste
       - key: SCHEDULE_TZ
-        value: Asia/Kolkata       # CHANGE to your timezone (e.g. America/New_York)
+        value: America/New_York
       # ── Secrets — set these in the Render dashboard (sync:false = not in git) ──
       - key: GROQ_API_KEY
         sync: false
