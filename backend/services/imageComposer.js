@@ -386,10 +386,17 @@ async function composeSlideImages(slides, ogImage = null, imagePrompt = null, cu
 
 function cleanOldImages() {
   const cutoff = Date.now() - 60 * 60 * 1000;
-  fs.readdirSync(TEMP_DIR).forEach(f => {
-    const fp = path.join(TEMP_DIR, f);
-    if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp);
-  });
+  try {
+    fs.readdirSync(TEMP_DIR).forEach(f => {
+      const fp = path.join(TEMP_DIR, f);
+      try {
+        const st = fs.statSync(fp);
+        // Only delete old FILES — never recurse into subdirs (daily/, reels/),
+        // which previously threw EPERM and could crash the hourly timer.
+        if (st.isFile() && st.mtimeMs < cutoff) fs.unlinkSync(fp);
+      } catch {}
+    });
+  } catch {}
 }
 
 module.exports = { composeSlideImages, cleanOldImages };
