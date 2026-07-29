@@ -50,11 +50,23 @@ function looksLikeTool(text) {
   return TOOL_SIGNALS.some((s) => t.includes(s));
 }
 
+// HN and Reddit hand back HTML-escaped text. It has to be decoded before it can
+// reach a video frame, otherwise viewers literally read "There&#x27;s no shortage".
+function decodeEntities(s) {
+  return String(s || '')
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&'); // last — so "&amp;#x27;" doesn't decode twice
+}
+
 function norm(o) {
   return {
-    name: String(o.name || '').trim().slice(0, 80),
-    tagline: String(o.tagline || '').trim().slice(0, 200),
-    description: String(o.description || o.tagline || '').trim().slice(0, 1200),
+    name: decodeEntities(o.name).trim().slice(0, 80),
+    tagline: decodeEntities(o.tagline).trim().slice(0, 200),
+    description: decodeEntities(o.description || o.tagline).trim().slice(0, 1200),
     url: String(o.url || '').trim(),
     source: o.source || 'unknown',
     category: o.category || classifyCategory(`${o.name} ${o.tagline} ${o.description}`),
@@ -106,7 +118,9 @@ async function fromShowHN() {
       .filter((h) => h.url && h.title)
       .filter((h) => /\bai\b|gpt|llm|agent|generat|model|machine learning|diffusion|voice|image|video/i.test(`${h.title} ${h.story_text || ''}`))
       .map((h) => norm({
-        name: h.title.replace(/^show hn:\s*/i, '').split(/[–—\-–|:]/)[0].trim(),
+        // Cut the title at the first real separator only. Splitting on a bare
+        // hyphen used to mangle hyphenated product names ("Multi-LLM" → "Multi").
+        name: h.title.replace(/^show hn:\s*/i, '').split(/\s+[–—|]\s+|\s+-\s+|:\s+|,\s+/)[0].trim(),
         tagline: h.title.replace(/^show hn:\s*/i, ''),
         description: (h.story_text || '').replace(/<[^>]+>/g, '').slice(0, 800),
         url: h.url, source: 'ShowHN', votes: h.points || 0, isNew: true,
@@ -203,17 +217,25 @@ async function fromReddit() {
 }
 
 // ── 5) HUGGING FACE — trending Spaces (new runnable AI apps) ───────────────────
+// `full=true` is what makes this source usable: it returns cardData.title (a real
+// human title, e.g. "Bonsai 27B WebGPU Kernels") and cardData.short_description
+// (what the Space actually does). Without it the API only gives the slug, and a
+// slug is not something a script writer can describe honestly.
 async function fromHuggingFace() {
   try {
-    const res = await axios.get('https://huggingface.co/api/spaces?sort=trendingScore&direction=-1&limit=30', {
-      headers: HEADERS, timeout: 9000,
+    const res = await axios.get('https://huggingface.co/api/spaces?sort=trendingScore&direction=-1&limit=40&full=true', {
+      headers: HEADERS, timeout: 12000,
     });
     return (res.data || [])
       .filter((s) => s.id)
       .map((s) => {
-        const name = s.id.split('/').pop().replace(/[-_]/g, ' ');
+        const slug = s.id.split('/').pop().replace(/[-_]/g, ' ');
+        const title = (s.cardData?.title || '').trim() || slug;
+        const blurb = (s.cardData?.short_description || '').trim();
         return norm({
-          name, tagline: name, description: (s.cardData?.title || name),
+          name: title,
+          tagline: blurb,
+          description: blurb,          // no blurb → dropped by the quality gate
           url: `https://huggingface.co/spaces/${s.id}`, source: 'HuggingFace',
           votes: s.likes || 0, isNew: true,
         });
@@ -257,13 +279,68 @@ async function fromDirectories() {
   return results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
 }
 
+// ── QUALITY GATE ──────────────────────────────────────────────────────────────
+// A tool is only publishable if we actually know what it does. When the script
+// writer is handed a bare slug it invents the details instead of admitting it has
+// none — that is how a reel titled "How to use boo" (a terminal multiplexer) got
+// rendered. Both checks below are cheap, and rejecting a tool costs nothing while
+// rendering a junk one costs a full TTS + FFmpeg pass.
+
+function words(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+}
+
+// Description must be substantive AND say something the name doesn't already say.
+function hasRealDescription(t) {
+  const desc = String(t.description || '').trim();
+  if (desc.length < 25) return false;
+  const dWords = words(desc);
+  if (dWords.length < 5) return false;
+  const nameWords = new Set(words(t.name));
+  const novel = dWords.filter((w) => !nameWords.has(w));
+  return novel.length >= 3;
+}
+
+// Upstream topic/subreddit filters are not enough — repos get mis-tagged `ai` and
+// generic dev tools slip through. Require an AI signal in the text itself.
+const AI_TERMS = new RegExp(
+  '\\b(' + [
+    'ai', 'a\\.i\\.', 'artificial intelligence', 'machine learning', 'deep learning',
+    'llm', 'llms', 'gpt', 'chatgpt', 'claude', 'gemini', 'llama', 'mistral', 'qwen',
+    'transformer', 'neural', 'diffusion', 'embedding', 'embeddings', 'rag',
+    'agent', 'agents', 'agentic', 'prompt', 'prompts', 'fine-?tun\\w*', 'inference',
+    'text-to-\\w+', 'speech-to-\\w+', 'image-to-\\w+', 'tts', 'stt', 'asr',
+    'voice clone\\w*', 'generative', 'copilot', 'multimodal', 'vision model',
+    'whisper', 'openai', 'anthropic', 'hugging ?face', 'stable diffusion',
+    'chatbot', 'summariz\\w+', 'transcrib\\w+',
+  ].join('|') + ')\\b', 'i'
+);
+
+function isAiRelevant(t) {
+  return AI_TERMS.test(`${t.name} ${t.tagline} ${t.description}`);
+}
+
 // ── ORCHESTRATOR ──────────────────────────────────────────────────────────────
 async function gatherTools() {
   const sources = [fromProductHunt, fromShowHN, fromGitHub, fromReddit, fromHuggingFace, fromDirectories];
   const settled = await Promise.allSettled(sources.map((fn) => fn()));
   const all = settled.flatMap((s) => (s.status === 'fulfilled' ? s.value : []));
-  const clean = all.filter((t) => t.name && t.url && t.name.length > 1);
-  console.log(`[ToolSrc] Gathered ${clean.length} raw tools from ${sources.length} sources`);
+
+  const rejected = { shape: 0, noDescription: 0, notAi: 0 };
+  const clean = all.filter((t) => {
+    if (!t.name || !t.url || t.name.length <= 1) { rejected.shape++; return false; }
+    if (!hasRealDescription(t)) { rejected.noDescription++; return false; }
+    if (!isAiRelevant(t)) { rejected.notAi++; return false; }
+    return true;
+  });
+
+  // Log per-source survivors so a source that quietly rots (or starts returning
+  // slugs again) is visible in the daily run instead of silently degrading picks.
+  const bySource = clean.reduce((acc, t) => { acc[t.source] = (acc[t.source] || 0) + 1; return acc; }, {});
+  console.log(`[ToolSrc] Gathered ${all.length} raw → ${clean.length} passed the quality gate`);
+  console.log(`[ToolSrc] Rejected: ${rejected.noDescription} no-description, ${rejected.notAi} not-AI, ${rejected.shape} malformed`);
+  console.log(`[ToolSrc] Survivors by source: ${JSON.stringify(bySource)}`);
+  if (!clean.length) console.log('[ToolSrc] ⚠️ every source failed the gate — picks will fall back to the seed pool');
   return clean;
 }
 
