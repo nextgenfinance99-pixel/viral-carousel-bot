@@ -11,19 +11,78 @@ function getCredentials() {
   return { accessToken, userId };
 }
 
-// Upload image to catbox.moe (free, no auth, permanent hosting)
-async function uploadImageToHost(filepath) {
-  const form = new FormData();
-  form.append('reqtype', 'fileupload');
-  form.append('fileToUpload', fs.createReadStream(filepath));
-  const res = await axios.post('https://catbox.moe/user/api.php', form, {
-    headers: form.getHeaders(),
-    timeout: 30000,
-  });
-  const url = res.data.trim();
-  console.log(`[Instagram] Uploaded image → ${url}`);
-  return url;
+// ── PUBLIC FILE HOSTING ───────────────────────────────────────────────────────
+// Instagram fetches media by URL, so every asset needs a temporary public link.
+// Providers are tried in order — catbox started returning 412 "Invalid uploader"
+// for anonymous uploads, so it is no longer the primary. Each provider only has
+// to outlive the container transcode (a couple of minutes), not the post itself.
+const FILE_HOSTS = [
+  {
+    name: 'litterbox',
+    async upload(filepath) {
+      const form = new FormData();
+      form.append('reqtype', 'fileupload');
+      form.append('time', '72h');
+      form.append('fileToUpload', fs.createReadStream(filepath));
+      const res = await axios.post('https://litterbox.catbox.moe/resources/internals/api.php', form, {
+        headers: form.getHeaders(), timeout: 120000,
+        maxBodyLength: Infinity, maxContentLength: Infinity,
+      });
+      const url = String(res.data).trim();
+      if (!/^https?:\/\//.test(url)) throw new Error(url.slice(0, 120));
+      return url;
+    },
+  },
+  {
+    name: 'tmpfiles',
+    async upload(filepath) {
+      const form = new FormData();
+      form.append('file', fs.createReadStream(filepath));
+      const res = await axios.post('https://tmpfiles.org/api/v1/upload', form, {
+        headers: form.getHeaders(), timeout: 120000,
+        maxBodyLength: Infinity, maxContentLength: Infinity,
+      });
+      const page = res.data?.data?.url;
+      if (!page) throw new Error(JSON.stringify(res.data).slice(0, 120));
+      // The API returns a viewer page; IG needs the direct file, which lives under /dl/.
+      return page.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+    },
+  },
+  {
+    name: 'catbox',
+    async upload(filepath) {
+      const form = new FormData();
+      form.append('reqtype', 'fileupload');
+      form.append('fileToUpload', fs.createReadStream(filepath));
+      const res = await axios.post('https://catbox.moe/user/api.php', form, {
+        headers: form.getHeaders(), timeout: 120000,
+        maxBodyLength: Infinity, maxContentLength: Infinity,
+      });
+      const url = String(res.data).trim();
+      if (!/^https?:\/\//.test(url)) throw new Error(url.slice(0, 120));
+      return url;
+    },
+  },
+];
+
+// Upload any file (image or mp4) and return a public URL Instagram can fetch.
+async function uploadFileToHost(filepath) {
+  const failures = [];
+  for (const host of FILE_HOSTS) {
+    try {
+      const url = await host.upload(filepath);
+      console.log(`[Instagram] Uploaded via ${host.name} → ${url}`);
+      return url;
+    } catch (e) {
+      const why = e.response ? `${e.response.status} ${String(e.response.data).slice(0, 60)}` : e.message;
+      console.log(`[Instagram] Host ${host.name} failed: ${why}`);
+      failures.push(`${host.name}: ${why}`);
+    }
+  }
+  throw new Error(`All file hosts failed — ${failures.join(' | ')}`);
 }
+
+const uploadImageToHost = uploadFileToHost;
 
 // Create a single carousel item container (not published on its own)
 async function createCarouselItem(imageUrl) {
@@ -94,19 +153,6 @@ async function postCarousel(imagePaths, caption) {
   const postId = await publishMedia(carouselId);
   console.log(`[Instagram] Published carousel: ${postId}`);
   return postId;
-}
-
-// Upload any file (incl. mp4) to catbox.moe — IG needs a public URL to fetch.
-async function uploadFileToHost(filepath) {
-  const form = new FormData();
-  form.append('reqtype', 'fileupload');
-  form.append('fileToUpload', fs.createReadStream(filepath));
-  const res = await axios.post('https://catbox.moe/user/api.php', form, {
-    headers: form.getHeaders(), timeout: 120000, maxBodyLength: Infinity, maxContentLength: Infinity,
-  });
-  const url = res.data.trim();
-  console.log(`[Instagram] Uploaded file → ${url}`);
-  return url;
 }
 
 // Post a single vertical video as a Reel. IG processes the video async, so we
