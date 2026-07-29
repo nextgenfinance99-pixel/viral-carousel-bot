@@ -4,8 +4,9 @@
  * Produces ONE reviewable draft bundle per day (nothing is posted here — the
  * dashboard approves assets into the existing postQueue):
  *   1× morning RUNDOWN reel  — girl host narrates all 5 tools ("discloses all 5")
- *   3× HOW-TO reels (~15s)    — boy host explains how to use 3 of those 5
- *   2× UPDATE reels           — "AI updates that day" via the news pipeline
+ *   1× HOW-TO reel (~15s)     — boy host explains how to use one of those 5
+ *   1× UPDATE reel            — "AI updates that day" via the news pipeline
+ * (counts are the defaults in generateDailyBundle; callers can override them)
  * Every asset is branded Day N/100.
  *
  * Finished videos are moved out of temp/reels (which is auto-purged after 6h)
@@ -90,8 +91,11 @@ async function renderReel({ script, host, dateKey, kind, slot, title, toolName, 
  */
 async function generateDailyBundle(opts = {}) {
   const dateKey = opts.dateKey || todayKey();
-  const howToCount = opts.howToCount ?? 3;
-  const updateCount = opts.updateCount ?? 2;
+  // Lean daily mix — 3 posts/day beats 6 for reach, and costs far less disk on
+  // the persistent volume. The update reel holds the slot the job/career
+  // carousel will take over once that track exists.
+  const howToCount = opts.howToCount ?? 1;
+  const updateCount = opts.updateCount ?? 1;
 
   const existing = getDraft(dateKey);
   if (existing && existing.status === 'ready' && !opts.force) {
