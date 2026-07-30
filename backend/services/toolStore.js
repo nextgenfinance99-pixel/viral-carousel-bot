@@ -138,8 +138,21 @@ function pickScore(t) {
  */
 async function pickFiveForToday(dateKey = todayKey(), count = 5) {
   const challenge = loadChallenge();
-  if (challenge.picksByDate[dateKey]) {
-    return { day: challenge.picksByDate[dateKey].day, dateKey, tools: challenge.picksByDate[dateKey].tools };
+  let reuseDay = null;
+  const cached = challenge.picksByDate[dateKey];
+  if (cached) {
+    // Picks are cached per date to keep a day's bundle stable across reruns, but a
+    // cache written before the quality gate existed would keep resurrecting junk
+    // (a terminal multiplexer got re-picked as an "AI tool" three renders running).
+    // Re-validate; only fall through to a fresh pick if the cache is unusable.
+    const bad = (cached.tools || []).filter((t) => !isPublishable(t));
+    if (!bad.length) return { day: cached.day, dateKey, tools: cached.tools };
+    console.log(`[ToolStore] Cached picks for ${dateKey} contain ${bad.length} unpublishable tool(s) ` +
+      `(${bad.map((t) => t.name).join(', ')}) — re-picking`);
+    // Keep this date's existing day number: re-picking is a correction, not a new
+    // day of the challenge, and nextDay() would otherwise skip Day 3 to Day 4.
+    reuseDay = cached.day;
+    delete challenge.picksByDate[dateKey];
   }
 
   const store = loadStore();
@@ -188,8 +201,8 @@ async function pickFiveForToday(dateKey = todayKey(), count = 5) {
   }
   saveStore(store);
 
-  // advance the 100-day counter
-  const day = nextDay(challenge);
+  // advance the 100-day counter (unless this is a correction to an existing day)
+  const day = reuseDay || nextDay(challenge);
   const slim = picked.map((t) => ({
     name: t.name, tagline: t.tagline, description: t.description, url: t.url,
     category: t.category, source: t.source, isNew: !!t.isNew, howTo: t.howTo || null,
