@@ -344,4 +344,10 @@ async function gatherTools() {
   return clean;
 }
 
-module.exports = { gatherTools, classifyCategory };
+// isPublishable is exported so the store can re-apply the gate to records that
+// were ingested before it existed, instead of serving them forever.
+function isPublishable(t) {
+  return !!(t && t.name && t.url && t.name.length > 1 && hasRealDescription(t) && isAiRelevant(t));
+}
+
+module.exports = { gatherTools, classifyCategory, isPublishable, hasRealDescription, isAiRelevant };

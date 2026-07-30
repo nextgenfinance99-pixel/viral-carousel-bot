@@ -15,7 +15,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { gatherTools, classifyCategory } = require('./toolSources');
+const { gatherTools, classifyCategory, isPublishable } = require('./toolSources');
 
 const DATA_DIR = path.join(__dirname, '../data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -67,6 +67,15 @@ async function ingest() {
   const store = loadStore();
   let added = 0;
   let fresh = [];
+
+  // Re-apply the publishability gate to what is already stored. Records ingested
+  // before the gate existed (bare Hugging Face slugs, mis-tagged non-AI repos)
+  // would otherwise stay in the pool and keep getting picked. Tools already used
+  // are kept so the Day N history and dedupe stay intact.
+  const before = store.tools.length;
+  store.tools = store.tools.filter((t) => t.usedAt || t.fromPool || isPublishable(t));
+  const pruned = before - store.tools.length;
+  if (pruned) console.log(`[ToolStore] Pruned ${pruned} unpublishable tools already in the store`);
   try {
     fresh = await gatherTools();
   } catch (e) {
