@@ -9,12 +9,15 @@ if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 const W = 1080, H = 1080;
 const PAD = 60;
 
-// Brand colors — cyan accent, NOT yellow (differentiate from competitors)
-const ACCENT  = '#00e5ff';   // cyan highlight
-const WHITE   = '#ffffff';
-const BLACK   = '#000000';
-const FONT    = 'Arial Black,Arial,sans-serif';
-const FONT_B  = 'Arial,sans-serif';
+// Brand comes from ../brand.js — shared with reelComposer so the two can't drift.
+// Carousels are AI-pillar today; the jobs/career themes get wired in with the
+// carousel track (see brand.THEMES).
+const brand = require('../brand');
+const ACCENT  = brand.getTheme('ai').accent;
+const WHITE   = brand.INK.white;
+const BLACK   = brand.INK.black;
+const FONT    = brand.FONT_DISPLAY;
+const FONT_B  = brand.FONT_BODY;
 
 function esc(s) {
   return String(s || '')
@@ -111,7 +114,7 @@ function logoSvg() {
       fill="rgba(0,0,0,0.55)" stroke="rgba(255,255,255,0.25)" stroke-width="1.5"/>
     <text x="${PAD + 145}" y="79"
       font-family="${FONT}" font-size="20" font-weight="900"
-      fill="${WHITE}" text-anchor="middle" letter-spacing="2">DEVELOPSCHL</text>`;
+      fill="${WHITE}" text-anchor="middle" letter-spacing="2">${esc(brand.WORDMARK)}</text>`;
 }
 
 function socialBar() {
@@ -121,7 +124,7 @@ function socialBar() {
     <rect x="0" y="${H - 58}" width="${W}" height="1" fill="rgba(255,255,255,0.12)"/>
     <text x="${PAD}" y="${H - 20}"
       font-family="${FONT_B}" font-size="22" font-weight="600"
-      fill="rgba(255,255,255,0.55)" letter-spacing="1">@developschl</text>
+      fill="rgba(255,255,255,0.55)" letter-spacing="1">${esc(brand.HANDLE)}</text>
     <text x="${W - PAD}" y="${H - 20}"
       font-family="${FONT_B}" font-size="22" font-weight="600"
       fill="${ACCENT}" text-anchor="end" letter-spacing="1">Follow for more →</text>`;
