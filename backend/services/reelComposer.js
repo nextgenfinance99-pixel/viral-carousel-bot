@@ -5,6 +5,7 @@ const fs = require('fs');
 
 const { synthesizeBeats } = require('./tts');
 const { renderAvatar, AVATAR_MODE } = require('./avatarRenderer');
+const { buildCaptionFile } = require('./captions');
 
 const REELS_DIR = path.join(__dirname, '../temp/reels');
 if (!fs.existsSync(REELS_DIR)) fs.mkdirSync(REELS_DIR, { recursive: true });
@@ -65,9 +66,14 @@ const GEO = {
   lockupH: 62,
   contentTop: 520,   // the band the eyebrow + headline + card are centred within
   contentBottom: 1470,
+  captionTop: 1150,  // top of the burned-in caption band (keep headlines above it)
   progressY: 1548,
   handleY: 1620,
 };
+
+// Burned-in captions are positioned by ASS as a bottom margin, so derive it from
+// captionTop to keep the two layouts from drifting apart.
+const CAPTION_MARGIN_V = H - GEO.captionTop - 190;
 
 // Shared background: near-black, coarse blueprint grid, one accent bloom.
 // The grid is deliberately coarse (90px) and faint — a fine grid shimmers badly
@@ -144,11 +150,14 @@ function footer(idx, total, accent) {
 }
 
 // ── FRAME (one beat card) ─────────────────────────────────────────────────────
-function buildFrameSvg(beat, idx, total, badge, themeName) {
+// `opts.captions` = word-synced captions will be burned in over this frame, so the
+// static narration card is dropped (the captions say the same words, live) and the
+// headline is lifted clear of the caption band instead of being centred into it.
+function buildFrameSvg(beat, idx, total, badge, themeName, opts = {}) {
   const theme = brand.getTheme(themeName || 'ai');
   const accent = theme.accent;
   const onscreen = (beat.onscreen || beat.text || '').toUpperCase();
-  const narration = beat.narration || '';
+  const narration = opts.captions ? '' : (beat.narration || '');
   const isCta = idx === total - 1;
 
   // Eyebrow above the headline: step number mid-reel, a call to action at the end.
@@ -181,10 +190,14 @@ function buildFrameSvg(beat, idx, total, badge, themeName) {
   const blockH = EYEBROW_SIZE + GAP_EYEBROW + headVisualH + GAP_RULE + RULE_H
     + (cardH ? GAP_CARD + cardH : 0);
 
-  const band = GEO.contentBottom - GEO.contentTop;
+  // With burned-in captions the headline has to end above the caption band, so the
+  // usable band shortens and the block sits high in it rather than centred low.
+  const bandBottom = opts.captions ? GEO.captionTop - 40 : GEO.contentBottom;
+  const band = bandBottom - GEO.contentTop;
   // 0.58 rather than 0.5 — a slight downward bias reads better in a vertical feed
   // and keeps the headline clear of the thumb-scroll zone at the very top.
-  const visualTop = GEO.contentTop + Math.max(0, Math.round((band - blockH) * 0.58));
+  const bias = opts.captions ? 0.35 : 0.58;
+  const visualTop = GEO.contentTop + Math.max(0, Math.round((band - blockH) * bias));
 
   let cursor = visualTop + EYEBROW_SIZE;
   const eyebrowSvg = `
@@ -386,12 +399,17 @@ async function composeReel(script, opts = {}) {
   console.log(`[Reel] Synthesizing ${beats.length} narration clips...`);
   const clips = await synthesizeBeats(beats, script.narrationVoice, work);
 
+  // Word-synced captions are on by default — they are the defining element of the
+  // format, and the timings come free from the TTS metadata.
+  const wantCaptions = opts.captions !== false;
+
   // 2) Render a frame per beat
   console.log('[Reel] Rendering frames...');
   const segPaths = [];
+  const captionSegments = [];
   let totalDur = 0;
   for (let i = 0; i < beats.length; i++) {
-    const svg = buildFrameSvg(beats[i], i, beats.length, badge, themeName);
+    const svg = buildFrameSvg(beats[i], i, beats.length, badge, themeName, { captions: wantCaptions });
     const framePath = path.join(work, `frame_${i}.png`);
     await sharp(Buffer.from(svg)).png().toFile(framePath);
 
@@ -400,6 +418,8 @@ async function composeReel(script, opts = {}) {
     const segPath = path.join(work, `seg_${i}.mp4`);
     await buildSegment(framePath, clip.filepath, dur, segPath, i % 2 === 0);
     segPaths.push(segPath);
+    // Record where this beat lands in the finished video so captions line up.
+    captionSegments.push({ words: clip.words || [], offset: totalDur });
     totalDur += dur;
     console.log(`[Reel] Segment ${i} → ${dur.toFixed(2)}s`);
   }
@@ -423,6 +443,10 @@ async function composeReel(script, opts = {}) {
       await buildSegment(introFrame, introAudio, introDur, introSeg, true);
       segPaths.unshift(introSeg);
       totalDur += introDur;
+      // The intro goes in FRONT, so every beat now starts introDur later than it
+      // did when its caption offset was recorded. Without this the captions run
+      // ahead of the voice by the length of the intro.
+      for (const seg of captionSegments) seg.offset += introDur;
       console.log(`[Reel] Intro sting prepended (${introDur.toFixed(2)}s, ${path.basename(intro.image)})`);
     } catch (e) {
       console.log(`[Reel] Intro skipped: ${e.message}`);
@@ -441,6 +465,39 @@ async function composeReel(script, opts = {}) {
     '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart',
     outPath,
   ]);
+
+  // 3b) Burn word-synced captions. Done after concat so one libass pass covers the
+  // whole timeline; doing it per segment would re-encode every clip twice.
+  if (wantCaptions) {
+    try {
+      const assPath = buildCaptionFile(captionSegments, {
+        themeName,
+        playResX: W, playResY: H,
+        marginV: CAPTION_MARGIN_V,
+        outPath: path.join(work, 'captions.ass'),
+      });
+      if (assPath) {
+        const withCaps = path.join(REELS_DIR, `reel_${stamp}_cap.mp4`);
+        // libass needs a POSIX-ish path and ':' escaped, or the filter arg splits.
+        const filterPath = assPath.replace(/\\/g, '/').replace(/:/g, '\\:');
+        await ffmpeg([
+          '-y', '-i', outPath, '-vf', `ass='${filterPath}'`,
+          '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+          '-c:a', 'copy', '-movflags', '+faststart', withCaps,
+        ]);
+        try { fs.rmSync(outPath, { force: true }); } catch {}
+        outName = path.basename(withCaps);
+        outPath = withCaps;
+        const total = captionSegments.reduce((n, s) => n + (s.words?.length || 0), 0);
+        console.log(`[Reel] Captions burned in (${total} words word-synced)`);
+      } else {
+        console.log('[Reel] No word timings available — captions skipped');
+      }
+    } catch (e) {
+      // Never lose a finished reel over captions.
+      console.log(`[Reel] Captions skipped: ${e.message}`);
+    }
+  }
 
   // 4a) Static host avatar overlay (upper-right, subtle bob) — free, no GPU
   const hostImage = resolveHostImage(opts.host || 'auto', script.narrationVoice);

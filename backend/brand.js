@@ -24,6 +24,10 @@ const WORDMARK = 'DEVELOPSCHL';
 // Arial -> Liberation Sans). Do not add a font here without installing it.
 const FONT_DISPLAY = 'Arial Black,Arial,sans-serif';
 const FONT_BODY = 'Arial,sans-serif';
+// Burned-in captions go through libass, which needs a single resolved family name
+// rather than a CSS-style fallback list. Liberation Sans Bold is installed in the
+// Docker image and is metrically Arial Bold.
+const CAPTION_FONT = 'Liberation Sans';
 
 const THEMES = {
   ai:     { accent: '#00e5ff', label: 'AI' },
@@ -87,7 +91,7 @@ function getTheme(name = 'ai') {
 }
 
 module.exports = {
-  HANDLE, WORDMARK, FONT_DISPLAY, FONT_BODY,
+  HANDLE, WORDMARK, FONT_DISPLAY, FONT_BODY, CAPTION_FONT,
   THEMES, INK, SAFE,
   getTheme, contrastWithBlack, assertAccentContrast,
 };
