@@ -1,27 +1,5 @@
-const path = require('path');
-const sharp = require('sharp');
 const tg = require('./telegram');
 const { getDraft, getAsset, updateAsset, publishAsset, regenerateAsset } = require('./dailyChallenge');
-
-const AVATARS_DIR = path.join(__dirname, '../assets/avatars');
-const VALID_SLOTS = ['host', 'boy', 'girl'];
-
-// Save a photo the user sent as a host/avatar image (slot from the caption).
-async function setAvatarFromPhoto(fileId, captionRaw, chatId) {
-  const slot = VALID_SLOTS.includes(String(captionRaw || '').trim().toLowerCase())
-    ? String(captionRaw).trim().toLowerCase() : 'host';
-  const tmp = path.join(AVATARS_DIR, `_incoming_${Date.now()}`);
-  try {
-    await tg.downloadFile(fileId, tmp);
-    await sharp(tmp).resize(1280, 1280, { fit: 'inside', withoutEnlargement: true }).png()
-      .toFile(path.join(AVATARS_DIR, `${slot}.png`));
-    await tg.sendMessage(`✅ Updated the <b>${slot}</b> image. New reels will use it.${slot === 'host' ? '' : `\n(Tip: add a caption "host", "boy" or "girl" with the photo to target a slot.)`}`, undefined, chatId);
-  } catch (e) {
-    await tg.sendMessage(`❌ Could not save that image: ${e.message}`, undefined, chatId);
-  } finally {
-    try { require('fs').rmSync(tmp, { force: true }); } catch {}
-  }
-}
 
 // Chats awaiting a free-text "what changes?" reply → { dateKey, assetId, title }
 const pendingFeedback = new Map();
@@ -105,13 +83,10 @@ async function onCallback(cb) {
 async function onMessage(msg) {
   const chatId = String(msg.chat?.id || '');
 
-  // A photo (or image file) → update a host/avatar slot.
-  if (msg.photo && msg.photo.length) {
-    await setAvatarFromPhoto(msg.photo[msg.photo.length - 1].file_id, msg.caption, chatId);
-    return;
-  }
-  if (msg.document && /^image\//.test(msg.document.mime_type || '')) {
-    await setAvatarFromPhoto(msg.document.file_id, msg.caption, chatId);
+  // Photos used to set a host image. That system is gone — reels are drawn
+  // entirely from code — so say so rather than silently ignoring the upload.
+  if ((msg.photo && msg.photo.length) || (msg.document && /^image\//.test(msg.document.mime_type || ''))) {
+    await tg.sendMessage('📷 Reels are generated from the brand template now — host images are no longer used, so this photo was not saved.', undefined, chatId);
     return;
   }
 
@@ -119,7 +94,7 @@ async function onMessage(msg) {
   if (!text) return;
 
   if (text === '/start' || text === '/help' || text === '/id') {
-    await tg.sendMessage(`👋 Connected! This is your DEVELOPSCHL reel review bot.\nYour chat id is <code>${chatId}</code>.\n\n• Daily drafts arrive here — tap ✅ to post, ✏️ to request changes (reply with notes), ⏭ to skip.\n• <b>Change pictures:</b> just send me a photo to update your host intro image (add caption "boy" or "girl" to set those instead).`, undefined, chatId);
+    await tg.sendMessage(`👋 Connected! This is your DEVELOPSCHL reel review bot.\nYour chat id is <code>${chatId}</code>.\n\n• Daily drafts arrive here — tap ✅ to post, ✏️ to request changes (reply with notes), ⏭ to skip.\n• Reels are drawn entirely from the brand template — there are no host images to upload.`, undefined, chatId);
     return;
   }
 

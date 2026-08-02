@@ -1,63 +1,8 @@
 const express = require('express');
-const multer = require('multer');
-const sharp = require('sharp');
-const fs = require('fs');
-const path = require('path');
 const router = express.Router();
 const { generateReelScript } = require('../services/reelScript');
 const { composeReel } = require('../services/reelComposer');
 const { fetchNewsArticle, fetchTrendingArticle } = require('../services/newsScraper');
-
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
-const AVATARS_DIR = path.join(__dirname, '../assets/avatars');
-const INTRO_CFG = path.join(__dirname, '../assets/intro.json');
-if (!fs.existsSync(AVATARS_DIR)) fs.mkdirSync(AVATARS_DIR, { recursive: true });
-
-const VALID_SLOTS = ['host', 'boy', 'girl'];
-
-// ── Upload a host / avatar image (saved as <slot>.png) ────────────────────────
-router.post('/asset', upload.single('image'), async (req, res) => {
-  const slot = String(req.body.slot || '').toLowerCase();
-  if (!VALID_SLOTS.includes(slot)) return res.status(400).json({ error: `slot must be one of ${VALID_SLOTS.join(', ')}` });
-  if (!req.file) return res.status(400).json({ error: 'image file is required' });
-  try {
-    const outPath = path.join(AVATARS_DIR, `${slot}.png`);
-    await sharp(req.file.buffer).resize(1280, 1280, { fit: 'inside', withoutEnlargement: true }).png().toFile(outPath);
-    res.json({ ok: true, slot });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── Which avatar slots are present ────────────────────────────────────────────
-router.get('/assets', (req, res) => {
-  const present = {};
-  for (const slot of VALID_SLOTS) present[slot] = fs.existsSync(path.join(AVATARS_DIR, `${slot}.png`));
-  res.json(present);
-});
-
-// ── Read / write the intro config ─────────────────────────────────────────────
-router.get('/intro', (req, res) => {
-  let cfg = { enabled: true, image: 'host.png', text: 'AI TOOL OF THE DAY', narration: '' };
-  if (fs.existsSync(INTRO_CFG)) { try { cfg = { ...cfg, ...JSON.parse(fs.readFileSync(INTRO_CFG, 'utf8')) }; } catch {} }
-  res.json(cfg);
-});
-
-router.post('/intro', (req, res) => {
-  const { enabled, text, narration } = req.body || {};
-  const cfg = {
-    enabled: enabled !== false,
-    image: 'host.png',
-    text: String(text || 'AI TOOL OF THE DAY').slice(0, 60),
-    narration: String(narration || '').slice(0, 300),
-  };
-  try {
-    fs.writeFileSync(INTRO_CFG, JSON.stringify(cfg, null, 2));
-    res.json({ ok: true, intro: cfg });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 // POST /api/reel/generate
 // Body (one of):

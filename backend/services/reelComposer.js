@@ -10,8 +10,6 @@ const { buildCaptionFile } = require('./captions');
 const REELS_DIR = path.join(__dirname, '../temp/reels');
 if (!fs.existsSync(REELS_DIR)) fs.mkdirSync(REELS_DIR, { recursive: true });
 
-const AVATARS_DIR = path.join(__dirname, '../assets/avatars');
-
 // ── VERTICAL CANVAS (Reels / Shorts / TikTok) ─────────────────────────────────
 const W = 1080, H = 1920;
 const PAD = 72;
@@ -277,112 +275,10 @@ async function buildSegment(framePath, audioPath, dur, segPath, zoomIn) {
   await ffmpeg(args);
 }
 
-// ── HOST AVATAR (static presenter overlay, no GPU) ────────────────────────────
-// Resolve which avatar image to use. `host` ∈ boy | girl | auto | none.
-// 'auto' matches the narration voice gender.
-function resolveHostImage(host, narrationVoice) {
-  if (host === 'none') return null;
-  let which = host;
-  if (!which || which === 'auto') {
-    which = String(narrationVoice || '').startsWith('male') ? 'boy' : 'girl';
-  }
-  for (const ext of ['png', 'jpg', 'jpeg', 'webp']) {
-    const p = path.join(AVATARS_DIR, `${which}.${ext}`);
-    if (fs.existsSync(p)) return p;
-  }
-  return null;
-}
-
-// Crop avatar to a circle with a cyan brand ring → transparent PNG.
-async function buildHostBadge(srcPath, outPath, size = 240, ring = 8) {
-  const circleMask = Buffer.from(
-    `<svg width="${size}" height="${size}"><circle cx="${size / 2}" cy="${size / 2}" r="${size / 2}" fill="#fff"/></svg>`
-  );
-  const ringSvg = Buffer.from(
-    `<svg width="${size}" height="${size}"><circle cx="${size / 2}" cy="${size / 2}" r="${size / 2 - ring / 2}" fill="none" stroke="${ACCENT}" stroke-width="${ring}"/></svg>`
-  );
-  const avatar = await sharp(srcPath).resize(size, size, { fit: 'cover', position: 'top' }).png().toBuffer();
-  const circled = await sharp(avatar).composite([{ input: circleMask, blend: 'dest-in' }]).png().toBuffer();
-  await sharp(circled).composite([{ input: ringSvg }]).png().toFile(outPath);
-}
-
-// ── BRANDED INTRO STING (static host, no GPU) ─────────────────────────────────
-// Resolve intro config from assets/intro.json (so "every reel starts the same"),
-// overridable per-request via opts.intro.
-function resolveIntro(optsIntro) {
-  if (optsIntro === false) return null;
-  let cfg = {};
-  const cfgPath = path.join(__dirname, '../assets/intro.json');
-  if (fs.existsSync(cfgPath)) {
-    try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch {}
-  }
-  if (optsIntro && typeof optsIntro === 'object') cfg = { ...cfg, ...optsIntro };
-  if (cfg.enabled === false) return null;
-
-  // Resolve image (default host.png in avatars dir)
-  let imgPath = null;
-  const imgName = cfg.image || 'host.png';
-  for (const cand of [path.join(AVATARS_DIR, imgName), path.isAbsolute(imgName) ? imgName : null].filter(Boolean)) {
-    if (fs.existsSync(cand)) { imgPath = cand; break; }
-  }
-  if (!imgPath) return null; // no host image → no intro (faceless)
-
-  return {
-    image: imgPath,
-    text: cfg.text || 'AI TOOL OF THE DAY',
-    narration: cfg.narration || '',
-  };
-}
-
-// Intro sting — same chrome as every other frame so the brand reads instantly,
-// with the host portrait as a framed circle rather than a full-bleed photo. The
-// photo is the one image in the system, and it is the user's own host, not stock.
-// `imgBase64` is expected to be a square crop (see composeReel).
-const INTRO_HOST = { cx: W / 2, cy: 760, r: 215, ring: 10 };
-
-function buildIntroFrameSvg(title, imgBase64, themeName) {
-  const theme = brand.getTheme(themeName || 'ai');
-  const accent = theme.accent;
-  const { cx, cy, r, ring } = INTRO_HOST;
-
-  const lines = wrap(String(title).toUpperCase(), 15).slice(0, 3);
-  const SIZE = lines.length > 2 ? 92 : 108;
-  const LH = Math.round(SIZE * 1.06);
-  const startY = 1180 + SIZE * 0.8;
-
-  const titleSvg = lines.map((line, i) =>
-    `<text x="${cx}" y="${startY + i * LH}" font-family="${FONT}" font-size="${SIZE}"
-      font-weight="900" fill="${WHITE}" text-anchor="middle" letter-spacing="-2">${esc(line)}</text>`
-  ).join('\n');
-
-  const hostSvg = imgBase64 ? `
-    <circle cx="${cx}" cy="${cy}" r="${r + 26}" fill="${accent}" opacity="0.12"/>
-    <image href="data:image/jpeg;base64,${imgBase64}"
-      x="${cx - r}" y="${cy - r}" width="${r * 2}" height="${r * 2}"
-      preserveAspectRatio="xMidYMid slice" clip-path="url(#hostClip)"/>
-    <circle cx="${cx}" cy="${cy}" r="${r - ring / 2}" fill="none" stroke="${accent}" stroke-width="${ring}"/>` : '';
-
-  const ruleY = startY + (lines.length - 1) * LH + 46;
-
-  return `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    ${chromeDefs(accent)}
-    <clipPath id="hostClip"><circle cx="${cx}" cy="${cy}" r="${r}"/></clipPath>
-  </defs>
-  ${chromeBackground(accent)}
-  ${brandLockup(accent)}
-  ${hostSvg}
-  ${titleSvg}
-  <rect x="${cx - 66}" y="${ruleY}" width="132" height="10" rx="5" fill="${accent}"/>
-  <text x="${cx}" y="${GEO.handleY}" font-family="${FONT_B}" font-size="30" font-weight="700"
-    fill="${INK.muted}" text-anchor="middle" letter-spacing="1.5">${esc(HANDLE)}</text>
-</svg>`;
-}
-
 /**
  * Compose a full vertical reel from a script.
  * @param {Object} script  - from generateReelScript(): { beats, badge?, narrationVoice, ... }
- * @param {Object} [opts]  - { backgrounds?: string[] (base64 per beat), faceImage?: string }
+ * @param {Object} [opts]  - { host?, theme?, captions?: boolean }
  * @returns {Promise<{ filename, filepath, durationSec, beats }>}
  */
 async function composeReel(script, opts = {}) {
@@ -424,34 +320,9 @@ async function composeReel(script, opts = {}) {
     console.log(`[Reel] Segment ${i} → ${dur.toFixed(2)}s`);
   }
 
-  // 2b) Optional branded intro sting (host photo + title), prepended
-  const intro = resolveIntro(opts.intro);
-  if (intro) {
-    try {
-      let introDur = 1.8, introAudio = null;
-      if (intro.narration) {
-        const [clip] = await synthesizeBeats([{ narration: intro.narration }], script.narrationVoice, work);
-        if (clip) { introAudio = clip.filepath; introDur = Math.max(1.6, (clip.duration || 1.8) + 0.4); }
-      }
-      // Square crop — the intro frames the host in a circle, not full-bleed.
-      const side = INTRO_HOST.r * 2;
-      const introB64 = (await sharp(intro.image)
-        .resize(side, side, { fit: 'cover', position: 'top' }).jpeg({ quality: 90 }).toBuffer()).toString('base64');
-      const introFrame = path.join(work, 'frame_intro.png');
-      await sharp(Buffer.from(buildIntroFrameSvg(intro.text, introB64, themeName))).png().toFile(introFrame);
-      const introSeg = path.join(work, 'seg_intro.mp4');
-      await buildSegment(introFrame, introAudio, introDur, introSeg, true);
-      segPaths.unshift(introSeg);
-      totalDur += introDur;
-      // The intro goes in FRONT, so every beat now starts introDur later than it
-      // did when its caption offset was recorded. Without this the captions run
-      // ahead of the voice by the length of the intro.
-      for (const seg of captionSegments) seg.offset += introDur;
-      console.log(`[Reel] Intro sting prepended (${introDur.toFixed(2)}s, ${path.basename(intro.image)})`);
-    } catch (e) {
-      console.log(`[Reel] Intro skipped: ${e.message}`);
-    }
-  }
+  // NOTE: there is deliberately no intro sting. Reels open straight on the hook —
+  // a title card in front of it is the worst thing for retention, and the brand
+  // lockup is already on the first frame and every frame after it.
 
   // 3) Concatenate segments
   const listPath = path.join(work, 'concat.txt');
@@ -499,30 +370,9 @@ async function composeReel(script, opts = {}) {
     }
   }
 
-  // 4a) Static host avatar overlay (upper-right, subtle bob) — free, no GPU
-  const hostImage = resolveHostImage(opts.host || 'auto', script.narrationVoice);
-  if (hostImage) {
-    try {
-      const badgePath = path.join(REELS_DIR, `host_${stamp}.png`);
-      await buildHostBadge(hostImage, badgePath);
-      const withHost = path.join(REELS_DIR, `reel_${stamp}_host.mp4`);
-      // Bob vertically ~±8px on a 2.5s cycle so the static face feels alive.
-      await ffmpeg([
-        '-y', '-i', outPath, '-i', badgePath,
-        '-filter_complex', `[0:v][1:v]overlay=x=W-w-44:y='248+8*sin(2*PI*t/2.5)'[v]`,
-        '-map', '[v]', '-map', '0:a', '-c:v', 'libx264', '-preset', 'veryfast',
-        '-pix_fmt', 'yuv420p', '-c:a', 'copy', '-movflags', '+faststart', withHost,
-      ]);
-      try { fs.rmSync(outPath, { force: true }); fs.rmSync(badgePath, { force: true }); } catch {}
-      outName = path.basename(withHost);
-      outPath = withHost;
-      console.log(`[Reel] Host avatar overlaid (${path.basename(hostImage)})`);
-    } catch (e) {
-      console.log(`[Reel] Host overlay skipped: ${e.message}`);
-    }
-  }
+  // NOTE: no static host-photo overlay either. Removed with the intro sting.
 
-  // 4b) Optional talking-head overlay (none by default → skipped)
+  // 4) Optional talking-head overlay (none by default → skipped)
   if (AVATAR_MODE !== 'none') {
     try {
       const avatarPath = await renderAvatar({ outDir: work, faceImage: opts.faceImage });
@@ -563,5 +413,5 @@ module.exports = {
   composeReel, cleanOldReels, REELS_DIR,
   // Exported so the template can be previewed (and eyeballed) without paying for
   // a full TTS + FFmpeg render.
-  buildFrameSvg, buildIntroFrameSvg,
+  buildFrameSvg,
 };

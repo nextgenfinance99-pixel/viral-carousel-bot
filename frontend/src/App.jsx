@@ -3,10 +3,6 @@ import {
   fetchNews,
   generateSlides,
   generateReel,
-  uploadReelAsset,
-  getReelAssets,
-  getReelIntro,
-  saveReelIntro,
   generateCustomSlides,
   postCarousel,
   runPipeline,
@@ -51,13 +47,7 @@ export default function App() {
   const [reelMode, setReelMode]     = useState('tool'); // 'tool' | 'topic' | 'trending'
   const [reelTool, setReelTool]     = useState({ name: '', tagline: '', description: '', url: '' });
   const [reelTopic, setReelTopic]   = useState('');
-  const [reelHost, setReelHost]     = useState('auto'); // auto | girl | boy | none
   const [reelResult, setReelResult] = useState(null);
-  const [reelAssets, setReelAssets] = useState({ host: false, boy: false, girl: false });
-  const [introCfg, setIntroCfg]     = useState({ enabled: true, text: 'AI TOOL OF THE DAY', narration: '' });
-  const [introSaved, setIntroSaved] = useState(false);
-  const [uploadingSlot, setUploadingSlot] = useState(null);
-  const hostFileRef = useRef(null);
   const [error, setError]           = useState(null);
   const [posted, setPosted]         = useState(null);
   const [activeTab, setActiveTab]   = useState('manual');
@@ -91,7 +81,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'reel') loadReelMeta();
     if (activeTab === 'daily') loadDaily();
   }, [activeTab]);
 
@@ -208,7 +197,7 @@ export default function App() {
   async function handleGenerateReel() {
     setError(null);
     setReelResult(null);
-    let payload = { host: reelHost };
+    let payload = {};
     if (reelMode === 'tool') {
       if (!reelTool.name.trim()) return setError('Enter the AI tool name');
       payload.tool = reelTool;
@@ -229,38 +218,6 @@ export default function App() {
     }
   }
 
-  async function loadReelMeta() {
-    try { setReelAssets(await getReelAssets()); } catch {}
-    try {
-      const cfg = await getReelIntro();
-      setIntroCfg((p) => ({ ...p, ...cfg }));
-    } catch {}
-  }
-
-  async function handleUploadAsset(slot, file) {
-    if (!file) return;
-    setError(null);
-    setUploadingSlot(slot);
-    try {
-      await uploadReelAsset(slot, file);
-      await loadReelMeta();
-    } catch (e) {
-      setError(e.response?.data?.error || e.message);
-    } finally {
-      setUploadingSlot(null);
-    }
-  }
-
-  async function handleSaveIntro() {
-    setError(null);
-    try {
-      await saveReelIntro(introCfg);
-      setIntroSaved(true);
-      setTimeout(() => setIntroSaved(false), 3000);
-    } catch (e) {
-      setError(e.response?.data?.error || e.message);
-    }
-  }
 
   async function handleRunPipeline() {
     setError(null);
@@ -816,63 +773,6 @@ export default function App() {
         {activeTab === 'reel' && (
           <div className="workflow">
 
-            {/* INTRO & HOST SETUP */}
-            <div className="panel" style={{ marginBottom: '1.2rem' }}>
-              <div className="slides-label">🎭 INTRO &amp; HOST SETUP</div>
-
-              {/* Upload slots */}
-              <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.7rem' }}>
-                {[
-                  { slot: 'host', label: 'Intro Host', hint: 'opens every reel' },
-                  { slot: 'girl', label: 'Girl (corner)', hint: 'female voice' },
-                  { slot: 'boy', label: 'Boy (corner)', hint: 'male voice' },
-                ].map(({ slot, label, hint }) => (
-                  <label key={slot} style={{
-                    flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.2rem',
-                    padding: '0.8rem 0.4rem', textAlign: 'center', cursor: uploadingSlot ? 'wait' : 'pointer',
-                    border: `2px dashed ${reelAssets[slot] ? 'var(--green)' : 'var(--border)'}`,
-                    background: 'var(--bg3)', borderRadius: '8px', transition: 'border-color 0.2s',
-                  }}>
-                    <span style={{ fontFamily: 'var(--mono)', fontSize: '0.78rem', fontWeight: 700, color: reelAssets[slot] ? 'var(--green)' : 'var(--cyan)' }}>
-                      {uploadingSlot === slot ? '⏳ ...' : reelAssets[slot] ? '✓ ' + label : '↑ ' + label}
-                    </span>
-                    <span style={{ fontFamily: 'var(--mono)', fontSize: '0.62rem', color: 'var(--text-mute)' }}>{hint}</span>
-                    <input type="file" accept="image/*" style={{ display: 'none' }}
-                      onChange={(e) => handleUploadAsset(slot, e.target.files[0])} />
-                  </label>
-                ))}
-              </div>
-
-              {/* Intro config */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', margin: '1rem 0 0.6rem' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontFamily: 'var(--mono)', fontSize: '0.75rem', color: 'var(--text-dim)', cursor: 'pointer' }}>
-                  <input type="checkbox" checked={introCfg.enabled}
-                    onChange={(e) => setIntroCfg({ ...introCfg, enabled: e.target.checked })} />
-                  INTRO STING ENABLED
-                </label>
-              </div>
-              <div className="field">
-                <label>INTRO TITLE <span style={{ color: 'var(--text-mute)', fontWeight: 400 }}>(on-screen)</span></label>
-                <input type="text" value={introCfg.text}
-                  onChange={(e) => setIntroCfg({ ...introCfg, text: e.target.value })} style={inputStyle} />
-              </div>
-              <div className="field">
-                <label>INTRO SCRIPT <span style={{ color: 'var(--text-mute)', fontWeight: 400 }}>(spoken every reel)</span></label>
-                <textarea rows={2} value={introCfg.narration}
-                  placeholder="What's up, here is your AI tool of the day."
-                  onChange={(e) => setIntroCfg({ ...introCfg, narration: e.target.value })}
-                  style={{ ...inputStyle, resize: 'vertical' }} />
-              </div>
-              <button className="btn btn-cyan" onClick={handleSaveIntro} style={{ marginTop: '0.5rem' }}>
-                {introSaved ? '✓ SAVED' : '💾 SAVE INTRO'}
-              </button>
-              {!reelAssets.host && (
-                <div style={{ fontFamily: 'var(--mono)', fontSize: '0.68rem', color: 'var(--text-mute)', marginTop: '0.5rem' }}>
-                  Upload an "Intro Host" image to enable the opening sting. Without it, reels start faceless.
-                </div>
-              )}
-            </div>
-
             {/* INPUT */}
             <div className={`step ${reelResult ? 'done' : 'active'}`}>
               <div className="step-connector">
@@ -956,32 +856,6 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Host avatar selector */}
-                  <div className="field">
-                    <label>HOST AVATAR</label>
-                    <div style={{ display: 'flex', gap: '0.5rem' }}>
-                      {[
-                        { k: 'auto', label: 'Auto' },
-                        { k: 'girl', label: '👩 Girl' },
-                        { k: 'boy', label: '👨 Boy' },
-                        { k: 'none', label: 'Faceless' },
-                      ].map(({ k, label }) => (
-                        <button key={k} onClick={() => setReelHost(k)}
-                          style={{
-                            flex: 1, padding: '0.45rem', fontFamily: 'var(--mono)', fontSize: '0.72rem',
-                            fontWeight: 700, border: `1px solid ${reelHost === k ? 'var(--cyan)' : 'var(--border)'}`,
-                            background: reelHost === k ? 'rgba(0,229,255,0.1)' : 'var(--bg3)',
-                            color: reelHost === k ? 'var(--cyan)' : 'var(--text-dim)',
-                            borderRadius: '6px', cursor: 'pointer', transition: 'all 0.15s',
-                          }}>
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                    <span style={{ fontFamily: 'var(--mono)', fontSize: '0.68rem', color: 'var(--text-mute)', marginTop: '0.3rem', display: 'block' }}>
-                      Auto matches the voice gender. Add images at backend/assets/avatars/.
-                    </span>
-                  </div>
 
                   <button className="btn btn-cyan" onClick={handleGenerateReel} disabled={loading.reel}>
                     {loading.reel ? '🎬 GENERATING REEL — ~30s...' : '🎬 GENERATE REEL'}
