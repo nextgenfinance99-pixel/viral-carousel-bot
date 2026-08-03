@@ -6,6 +6,7 @@ const fs = require('fs');
 const { synthesizeBeats } = require('./tts');
 const { renderAvatar, AVATAR_MODE } = require('./avatarRenderer');
 const { buildCaptionFile } = require('./captions');
+const { captureToolPage } = require('./screenCapture');
 
 const REELS_DIR = path.join(__dirname, '../temp/reels');
 if (!fs.existsSync(REELS_DIR)) fs.mkdirSync(REELS_DIR, { recursive: true });
@@ -70,8 +71,10 @@ const GEO = {
 };
 
 // Burned-in captions are positioned by ASS as a bottom margin, so derive it from
-// captionTop to keep the two layouts from drifting apart.
+// captionTop to keep the two layouts from drifting apart. The B-roll layout pushes
+// them lower, since the footage band occupies where they would otherwise sit.
 const CAPTION_MARGIN_V = H - GEO.captionTop - 190;
+const CAPTION_MARGIN_V_BROLL = H - 1300 - 190;
 
 // Shared background: near-black, coarse blueprint grid, one accent bloom.
 // The grid is deliberately coarse (90px) and faint — a fine grid shimmers badly
@@ -93,16 +96,42 @@ function chromeDefs(accent) {
     <linearGradient id="floor" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%"   stop-color="rgba(0,0,0,0)"/>
       <stop offset="100%" stop-color="rgba(0,0,0,0.55)"/>
-    </linearGradient>`;
+    </linearGradient>
+    <clipPath id="outsideBand">
+      <rect x="0" y="0" width="${W}" height="${BROLL.y}"/>
+      <rect x="0" y="${BROLL.y + BROLL.h}" width="${W}" height="${H - BROLL.y - BROLL.h}"/>
+    </clipPath>`;
 }
 
-function chromeBackground(accent) {
-  return `
+// The B-roll band. When a clip is available the frame leaves this area EMPTY (fully
+// transparent) and FFmpeg lays the footage in underneath, so one PNG serves as both
+// the chrome and the mask. An accent hairline frames the footage so it reads as a
+// deliberate window rather than a video pasted on top.
+// y starts BELOW the lockup band (which ends at lockupY + lockupH = 324). The first
+// version began at 232 and put the wordmark and the day chip on top of the footage,
+// where a white page made both unreadable.
+const BROLL = { x: 0, y: 356, w: W, h: 800 };
+
+function chromeBackground(accent, opts = {}) {
+  const layers = `
     <rect width="${W}" height="${H}" fill="${INK.base}"/>
     <rect width="${W}" height="${H}" fill="url(#grid)"/>
     <rect width="${W}" height="${H}" fill="url(#bloom)"/>
-    <rect x="0" y="${H * 0.6}" width="${W}" height="${H * 0.4}" fill="url(#floor)"/>
-    <rect x="0" y="0" width="${GEO.rail}" height="${H}" fill="url(#railGrad)"/>`;
+    <rect x="0" y="${H * 0.6}" width="${W}" height="${H * 0.4}" fill="url(#floor)"/>`;
+
+  const rail = `<rect x="0" y="0" width="${GEO.rail}" height="${H}" fill="url(#railGrad)"/>`;
+
+  if (!opts.broll) return `${layers}\n    ${rail}`;
+
+  // SVG has no "erase": painting fill="none" over an opaque background does nothing,
+  // which is why the band came out solid black on the first attempt. Instead CLIP the
+  // painted layers to everything OUTSIDE the band (two rects above and below it), so
+  // the band is genuinely transparent and the footage shows through from underneath.
+  return `
+    <g clip-path="url(#outsideBand)">${layers}</g>
+    <rect x="${BROLL.x}" y="${BROLL.y}" width="${BROLL.w}" height="${BROLL.h}"
+      fill="none" stroke="${accent}" stroke-opacity="0.55" stroke-width="3"/>
+    ${rail}`;
 }
 
 // Top-left: accent tile + wordmark. The tile is the mark people learn to spot.
@@ -225,17 +254,33 @@ function buildFrameSvg(beat, idx, total, badge, themeName, opts = {}) {
         font-size="34" font-weight="600" fill="rgba(255,255,255,0.93)">${esc(line)}</text>`
     ).join('\n')}` : '';
 
+  // With B-roll the footage carries the visual and the burned-in captions carry the
+  // words, so the big static headline is dropped — exactly how the reference reels
+  // are built. Keeping it would also leave nowhere for it to sit: the band, the
+  // headline and the caption zone cannot all fit above the footer.
+  const body = opts.broll
+    ? `${eyebrowUnderBand(eyebrow, accent)}`
+    : `${eyebrowSvg}\n  ${headSvg}\n  ${ruleSvg}\n  ${subSvg}`;
+
   return `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
   <defs>${chromeDefs(accent)}</defs>
-  ${chromeBackground(accent)}
+  ${chromeBackground(accent, { broll: opts.broll })}
   ${brandLockup(accent)}
   ${dayChip(badge, accent)}
-  ${eyebrowSvg}
-  ${headSvg}
-  ${ruleSvg}
-  ${subSvg}
+  ${body}
   ${footer(idx, total, accent)}
 </svg>`;
+}
+
+// In the B-roll layout the only text above the captions is a small label sitting
+// just under the footage, naming what the viewer is looking at.
+function eyebrowUnderBand(eyebrow, accent) {
+  const x = brand.SAFE.left;
+  const y = BROLL.y + BROLL.h + 62;
+  return `
+    <rect x="${x}" y="${y - 6}" width="42" height="6" rx="3" fill="${accent}"/>
+    <text x="${x + 60}" y="${y}" font-family="${FONT}" font-size="27"
+      font-weight="900" fill="${accent}" letter-spacing="4">${esc(eyebrow)}</text>`;
 }
 
 // ── FFMPEG HELPERS ────────────────────────────────────────────────────────────
@@ -246,6 +291,48 @@ function ffmpeg(args) {
       else resolve();
     });
   });
+}
+
+/**
+ * Build a segment with B-roll footage showing through the frame's transparent band.
+ *
+ * The frame PNG is the mask AND the chrome: the band is punched out of it, so a
+ * single overlay puts the footage behind everything. The clip is scaled to cover
+ * the band and looped, because a captured page clip is usually shorter than the
+ * beat it has to fill.
+ */
+async function buildBrollSegment(framePath, brollPath, audioPath, dur, segPath) {
+  const args = [
+    '-y',
+    '-stream_loop', '-1', '-i', brollPath,      // loop the footage to cover the beat
+    '-loop', '1', '-framerate', String(FPS), '-i', framePath,
+  ];
+  if (audioPath) args.push('-i', audioPath);
+  else args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100');
+
+  // Scale-to-cover then centre-crop, so page footage of any aspect fills the band
+  // without letterboxing or distortion. A slow drift keeps the band from feeling
+  // static when the captured page happens to be still.
+  // A slight knock-down on brightness/saturation: captured pages are often pure
+  // white and blow out next to the near-black chrome, which makes the whole frame
+  // look like two unrelated images stacked.
+  const filter =
+    `[0:v]scale=${BROLL.w}:${BROLL.h}:force_original_aspect_ratio=increase,` +
+    `crop=${BROLL.w}:${BROLL.h},eq=brightness=-0.06:saturation=0.92,setsar=1,fps=${FPS}[bs];` +
+    `color=c=${INK.base}:s=${W}x${H}:r=${FPS}[bg];` +
+    `[bg][bs]overlay=${BROLL.x}:${BROLL.y}:shortest=0[withb];` +
+    `[withb][1:v]overlay=0:0:format=auto,format=yuv420p[v]`;
+
+  args.push(
+    '-filter_complex', filter,
+    '-map', '[v]', '-map', '2:a',
+    '-t', dur.toFixed(2),
+    '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
+    '-r', String(FPS),
+    segPath
+  );
+  await ffmpeg(args);
 }
 
 // Build one video segment: still frame held for `dur`s, with its narration (or silence).
@@ -299,20 +386,33 @@ async function composeReel(script, opts = {}) {
   // format, and the timings come free from the TTS metadata.
   const wantCaptions = opts.captions !== false;
 
+  // 0) B-roll: record the tool's own page so the reel shows the real product.
+  // Entirely optional — a failed or blank capture just falls back to the plain
+  // template rather than costing us the reel.
+  let brollClip = null;
+  const brollUrl = opts.brollUrl || script.brollUrl;
+  if (brollUrl && opts.broll !== false) {
+    console.log(`[Reel] Capturing B-roll from ${brollUrl}`);
+    brollClip = await captureToolPage(brollUrl, { seconds: 8 }).catch(() => null);
+  }
+
   // 2) Render a frame per beat
   console.log('[Reel] Rendering frames...');
   const segPaths = [];
   const captionSegments = [];
   let totalDur = 0;
   for (let i = 0; i < beats.length; i++) {
-    const svg = buildFrameSvg(beats[i], i, beats.length, badge, themeName, { captions: wantCaptions });
+    const svg = buildFrameSvg(beats[i], i, beats.length, badge, themeName, {
+      captions: wantCaptions, broll: !!brollClip,
+    });
     const framePath = path.join(work, `frame_${i}.png`);
     await sharp(Buffer.from(svg)).png().toFile(framePath);
 
     const clip = clips.find((c) => c.index === i) || { filepath: null, duration: 2.5 };
     const dur = Math.max(1.6, (clip.duration || 2.5) + 0.45); // pad so narration isn't clipped
     const segPath = path.join(work, `seg_${i}.mp4`);
-    await buildSegment(framePath, clip.filepath, dur, segPath, i % 2 === 0);
+    if (brollClip) await buildBrollSegment(framePath, brollClip, clip.filepath, dur, segPath);
+    else await buildSegment(framePath, clip.filepath, dur, segPath, i % 2 === 0);
     segPaths.push(segPath);
     // Record where this beat lands in the finished video so captions line up.
     captionSegments.push({ words: clip.words || [], offset: totalDur });
@@ -344,7 +444,7 @@ async function composeReel(script, opts = {}) {
       const assPath = buildCaptionFile(captionSegments, {
         themeName,
         playResX: W, playResY: H,
-        marginV: CAPTION_MARGIN_V,
+        marginV: brollClip ? CAPTION_MARGIN_V_BROLL : CAPTION_MARGIN_V,
         outPath: path.join(work, 'captions.ass'),
       });
       if (assPath) {

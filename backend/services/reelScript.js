@@ -275,4 +275,160 @@ Return ONLY valid JSON:
   };
 }
 
-module.exports = { generateReelScript, generateRundownScript, generateHowToScript };
+/**
+ * SPOTLIGHT script — one tool, shown working, framed against what it replaces.
+ *
+ * This replaces the 5-tool rundown as the main daily format. Three reasons, all
+ * from watching how the current reels actually perform:
+ *   - "Here are 5 AI tools" is the most saturated format on the platform, and a
+ *     list of names gives nobody a reason to save the post.
+ *   - Five tools in 30s means ~5s each, which is not enough to show any of them.
+ *     One tool leaves room for real footage of it running.
+ *   - The "free alternative to X" angle is what earns the save. Novelty does not;
+ *     money does.
+ *
+ * The hook is the whole ballgame — beat 1 must land a claim before a thumb moves.
+ * The old prompts asked for a "scroll-stopping hook" and got labels like
+ * "HOW TO USE BONSAI", which is a title, not a reason to stay.
+ *
+ * Prices are deliberately never stated. The model does not reliably know current
+ * pricing and would invent it; naming the paid incumbent carries the comparison
+ * without asserting a number we cannot stand behind.
+ */
+async function generateSpotlightScript(tool, opts = {}) {
+  const name = tool.name || 'this AI tool';
+  const body = (tool.description || tool.tagline || '').slice(0, 1500);
+  const day = opts.day || null;
+
+  const fb = opts.feedback ? `\nREVIEWER REQUESTED CHANGES — apply this feedback: "${opts.feedback}"\n` : '';
+  const prompt = `You are writing a 30-40 second vertical reel about ONE AI tool for a faceless channel (DEVELOPSCHL).
+
+TOOL: ${name}
+WHAT IT IS: ${tool.tagline || ''}
+DETAILS: ${body}
+${tool.url ? `LINK: ${tool.url}` : ''}${fb}
+
+THE HOOK IS EVERYTHING. Beat 1 has under 2 seconds to stop a thumb.
+- It must be a CLAIM or a RESULT, never a label or a title.
+- BAD (these are titles, do not write these): "How to use ${name}", "${name} explained", "New AI tool"
+- GOOD (these are claims): "This replaces a $400 editor", "You can run a 27B model on your laptop", "Photoshop just became optional"
+- Max 7 words on screen. No greetings, no "in this video", no "let me show you".
+
+ANGLE: what expensive or tedious thing does this replace? Name the paid tool or the
+manual process it makes unnecessary. NEVER state a price, subscription cost or any
+number you are not certain of — name the competitor, not the amount.
+
+ACCURACY — these are claims about a real product and must be true:
+- Only name a competitor in the SAME category. An LLM runner does not replace an
+  image editor. If you cannot name a confident competitor, describe the manual
+  work it removes instead and set "replaces" to that.
+- Do NOT claim it runs locally, offline, privately, or "on your machine" unless the
+  DETAILS explicitly say so. A hosted demo page runs on someone else's servers.
+- Do NOT claim it is free, open source, or unlimited unless the DETAILS say so.
+- If the DETAILS are thin, stay descriptive. An accurate plain line beats an
+  exciting false one.
+
+STRUCTURE — exactly 5 beats:
+1. HOOK — the claim.
+2. WHAT IT IS — one line, plain English.
+3. WHAT IT REPLACES — the paid tool or manual work it kills.
+4. THE CATCH (or lack of one) — free? open source? runs locally? be accurate.
+5. CTA — tell them to save it.
+
+Each beat: "onscreen" = 2-6 punchy words. "narration" = one FULL spoken sentence of
+10-18 words. This is a hard requirement — fragments break the voiceover.
+  BAD (a fragment, not a sentence): "Using WebGPU for local processing."
+  GOOD (full sentence, same length target): "You point it at a folder and it sorts every file in seconds."
+The GOOD line above is only an example of LENGTH AND RHYTHM. Never reuse its wording
+or its claims — write about THIS tool from the DETAILS above.
+All narration read together must flow as one continuous voiceover.
+
+There is NO clickable link in a reel. Never say "link below", "link in bio", "check
+the description" or "click here" — the CTA is to follow or save.
+Never invent features, stats or prices. If unsure, stay general.
+
+Return ONLY valid JSON:
+{
+  "hook": "the beat-1 on-screen claim",
+  "replaces": "the paid tool or manual process this replaces, 1-4 words",
+  "badge": "short tag, max 12 chars, e.g. FREE TOOL | OPEN SOURCE | RUNS LOCAL",
+  "beats": [ { "onscreen": "BIG TEXT", "narration": "one sentence." } ],
+  "caption": "1-2 lines that make someone want to save this",
+  "narrationVoice": "one of: female_energetic | male_deep | female_calm"
+}`;
+
+  let parsed = {};
+  try {
+    const completion = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [
+        { role: 'system', content: 'You write viral faceless short-form video scripts. Respond with valid JSON only.' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.85, max_tokens: 1600, response_format: { type: 'json_object' },
+    });
+    parsed = parseLenientJSON(completion.choices[0].message.content);
+  } catch (e) {
+    console.log(`[Spotlight] Groq failed for ${name}: ${e.message}`);
+  }
+
+  let beats = (Array.isArray(parsed.beats) ? parsed.beats : [])
+    .map((b) => ({
+      onscreen: String(b.onscreen || '').trim().slice(0, 60),
+      narration: String(b.narration || '').trim(),
+    }))
+    .filter((b) => b.onscreen && b.narration)
+    .slice(0, 6);
+
+  // Fall back to something honest rather than failing the whole day's bundle.
+  if (beats.length < 3) {
+    const what = tool.tagline || tool.description || `a new AI tool`;
+    beats = [
+      { onscreen: name.toUpperCase().slice(0, 40), narration: `${name} does something you are probably paying for.` },
+      { onscreen: 'WHAT IT DOES', narration: String(what).slice(0, 160) },
+      { onscreen: 'SAVE THIS', narration: 'Follow for a new AI tool every single day.' },
+    ];
+  }
+
+  // A reel has no clickable link, but the model keeps writing CTAs that assume one.
+  // Rewrite rather than reject — the rest of the beat is usually fine.
+  // Any mention of a link is wrong in a reel — there is nothing to click. Matching
+  // the bare word catches the variants a narrower pattern missed ("the provided
+  // demo link", "link in bio", "check the description").
+  const LINK_CTA = /\b(links?|bio|description below|click here|see below)\b/i;
+  beats = beats.map((b) => (
+    LINK_CTA.test(b.narration)
+      ? { ...b, narration: 'Follow and save this — a new AI tool every single day.' }
+      : b
+  ));
+
+  // Beat 1 on screen must BE the hook. When they diverge the viewer reads one thing
+  // while hearing the setup for another, which wastes the only moment that matters.
+  if (parsed.hook && beats[0]) {
+    beats[0] = { ...beats[0], onscreen: String(parsed.hook).trim().slice(0, 60) };
+  }
+
+  // Instagram does not linkify captions, so a raw URL is pure noise in the copy.
+  const captionBody = String(parsed.caption || `${name} — ${tool.tagline || 'a free AI tool worth saving'}.`)
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+  const caption = ensureHashtags(captionBody, { pillar: 'ai', toolName: name });
+
+  return {
+    title: `${name}${parsed.replaces ? ` vs ${parsed.replaces}` : ''}`,
+    hook: parsed.hook || beats[0].onscreen,
+    replaces: parsed.replaces || null,
+    badge: String(parsed.badge || (day ? `DAY ${day}` : 'FREE TOOL'))
+      .toUpperCase().replace(/[^A-Z0-9 /]/g, '').trim().slice(0, 12),
+    beats,
+    caption,
+    cta: 'Follow for daily AI tools',
+    narrationVoice: ['female_energetic', 'male_deep', 'female_calm'].includes(parsed.narrationVoice)
+      ? parsed.narrationVoice : 'female_energetic',
+    musicMood: 'tech',
+    brollUrl: tool.url || null,   // reelComposer records this page as B-roll
+  };
+}
+
+module.exports = { generateReelScript, generateRundownScript, generateHowToScript, generateSpotlightScript };

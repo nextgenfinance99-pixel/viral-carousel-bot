@@ -3,10 +3,15 @@
  *
  * Produces ONE reviewable draft bundle per day (nothing is posted here — the
  * dashboard approves assets into the existing postQueue):
- *   1× morning RUNDOWN reel  — girl host narrates all 5 tools ("discloses all 5")
- *   1× HOW-TO reel (~15s)     — boy host explains how to use one of those 5
- *   1× UPDATE reel            — "AI updates that day" via the news pipeline
- * (counts are the defaults in generateDailyBundle; callers can override them)
+ *   1× SPOTLIGHT reel — one tool, shown working via captured B-roll of its own
+ *                       page, framed against the paid tool or manual work it
+ *                       replaces
+ *
+ * That is deliberately the whole bundle. It was 3/day (rundown + how-to + update)
+ * and before that 6/day, but volume was working against the account: posting
+ * repeatedly into zero engagement suppresses reach, and the five-tool rundown gave
+ * viewers nothing to save. howToCount/updateCount still exist and default to 0, so
+ * the old mix is one argument away if this proves wrong.
  * Every asset is branded Day N/100.
  *
  * Finished videos are moved out of temp/reels (which is auto-purged after 6h)
@@ -17,7 +22,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { pickFiveForToday, getChallengeStatus, todayKey, CHALLENGE_LENGTH } = require('./toolStore');
-const { generateRundownScript, generateHowToScript, generateReelScript } = require('./reelScript');
+const { generateRundownScript, generateHowToScript, generateReelScript, generateSpotlightScript } = require('./reelScript');
 const { composeReel } = require('./reelComposer');
 const { fetchNewsArticle } = require('./newsScraper');
 const { postReel } = require('./instagram');
@@ -94,8 +99,8 @@ async function generateDailyBundle(opts = {}) {
   // Lean daily mix — 3 posts/day beats 6 for reach, and costs far less disk on
   // the persistent volume. The update reel holds the slot the job/career
   // carousel will take over once that track exists.
-  const howToCount = opts.howToCount ?? 1;
-  const updateCount = opts.updateCount ?? 1;
+  const howToCount = opts.howToCount ?? 0;
+  const updateCount = opts.updateCount ?? 0;
 
   const existing = getDraft(dateKey);
   if (existing && existing.status === 'ready' && !opts.force) {
@@ -124,13 +129,22 @@ async function generateDailyBundle(opts = {}) {
     return draft;
   }
 
-  // 1) Morning rundown reel — GIRL host, all 5 tools
+  // 1) SPOTLIGHT — one tool, shown working, framed against what it replaces.
+  //
+  // This replaced the 5-tool rundown. A list of five names is the most saturated
+  // format on the platform and gives nobody a reason to save the post; five tools
+  // in thirty seconds is also ~5s each, which is not long enough to show any of
+  // them. One tool leaves room for real footage of it running.
   try {
-    const rundown = await generateRundownScript(tools, { day, length: CHALLENGE_LENGTH });
-    const a = await renderReel({ script: rundown, host: 'girl', dateKey, kind: 'rundown', slot: 'morning', title: rundown.title, regen: { type: 'rundown', day } });
+    const spotlight = await generateSpotlightScript(tools[0], { day });
+    const a = await renderReel({
+      script: spotlight, host: 'none', dateKey, kind: 'spotlight', slot: 'morning',
+      title: spotlight.title, toolName: tools[0].name, source: tools[0].url,
+      regen: { type: 'spotlight', tool: tools[0], day },
+    });
     draft.assets.push(a);
   } catch (e) {
-    draft.assets.push(newAsset('rundown', 'morning', { status: 'error', error: e.message, title: 'Morning rundown' }));
+    draft.assets.push(newAsset('spotlight', 'morning', { status: 'error', error: e.message, title: 'Daily spotlight' }));
   }
   saveDraft(draft);
 
@@ -229,7 +243,9 @@ async function regenerateAsset(dateKey, assetId, feedback) {
   const regen = asset.regen || {};
 
   let script, host = asset.host || 'auto';
-  if (regen.type === 'howto') {
+  if (regen.type === 'spotlight') {
+    script = await generateSpotlightScript(regen.tool, { day: regen.day, feedback }); host = 'none';
+  } else if (regen.type === 'howto') {
     script = await generateHowToScript(regen.tool, { day: regen.day, feedback }); host = 'boy';
   } else if (regen.type === 'rundown') {
     script = await generateRundownScript(draft.tools, { day: regen.day, length: CHALLENGE_LENGTH, feedback }); host = 'girl';
