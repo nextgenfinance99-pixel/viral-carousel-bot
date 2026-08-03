@@ -75,6 +75,9 @@ const GEO = {
 // them lower, since the footage band occupies where they would otherwise sit.
 const CAPTION_MARGIN_V = H - GEO.captionTop - 190;
 const CAPTION_MARGIN_V_BROLL = H - 1300 - 190;
+// Split layout: captions sit across the seam between footage and presenter, over the
+// video rather than below it — the placement the reference reels use.
+const CAPTION_MARGIN_V_SPLIT = 910;
 
 // Shared background: near-black, coarse blueprint grid, one accent bloom.
 // The grid is deliberately coarse (90px) and faint — a fine grid shimmers badly
@@ -100,6 +103,13 @@ function chromeDefs(accent) {
     <clipPath id="outsideBand">
       <rect x="0" y="0" width="${W}" height="${BROLL.y}"/>
       <rect x="0" y="${BROLL.y + BROLL.h}" width="${W}" height="${H - BROLL.y - BROLL.h}"/>
+    </clipPath>
+    <clipPath id="outsideBands">
+      <rect x="0" y="0" width="${W}" height="${BROLL_SPLIT.y}"/>
+      <rect x="0" y="${BROLL_SPLIT.y + BROLL_SPLIT.h}" width="${W}"
+            height="${PRESENTER.y - BROLL_SPLIT.y - BROLL_SPLIT.h}"/>
+      <rect x="0" y="${PRESENTER.y + PRESENTER.h}" width="${W}"
+            height="${H - PRESENTER.y - PRESENTER.h}"/>
     </clipPath>`;
 }
 
@@ -110,7 +120,23 @@ function chromeDefs(accent) {
 // y starts BELOW the lockup band (which ends at lockupY + lockupH = 324). The first
 // version began at 232 and put the wordmark and the day chip on top of the footage,
 // where a white page made both unreadable.
+// When a presenter clip is also present the frame splits the way the reference reels
+// do: product footage on top, presenter underneath, captions across the seam. The
+// B-roll band shortens to make room.
 const BROLL = { x: 0, y: 356, w: W, h: 800 };
+const BROLL_SPLIT = { x: 0, y: 356, w: W, h: 604 };
+const PRESENTER = { x: 0, y: 980, w: W, h: 540 };
+
+// The presenter loop lives here; absent just means the reel renders without it.
+const PRESENTER_CLIP = path.join(__dirname, '../assets/presenter/presenter.mp4');
+function resolvePresenter(opt) {
+  if (opt === false) return null;
+  if (typeof opt === 'string' && fs.existsSync(opt)) return opt;
+  return fs.existsSync(PRESENTER_CLIP) ? PRESENTER_CLIP : null;
+}
+
+// Which B-roll geometry applies depends on whether the presenter is in frame.
+function brollBand(hasPresenter) { return hasPresenter ? BROLL_SPLIT : BROLL; }
 
 function chromeBackground(accent, opts = {}) {
   const layers = `
@@ -121,16 +147,20 @@ function chromeBackground(accent, opts = {}) {
 
   const rail = `<rect x="0" y="0" width="${GEO.rail}" height="${H}" fill="url(#railGrad)"/>`;
 
-  if (!opts.broll) return `${layers}\n    ${rail}`;
+  if (!opts.broll && !opts.presenter) return `${layers}\n    ${rail}`;
 
   // SVG has no "erase": painting fill="none" over an opaque background does nothing,
   // which is why the band came out solid black on the first attempt. Instead CLIP the
-  // painted layers to everything OUTSIDE the band (two rects above and below it), so
-  // the band is genuinely transparent and the footage shows through from underneath.
+  // painted layers to everything OUTSIDE the bands, so they are genuinely transparent
+  // and the footage shows through from underneath.
+  const band = brollBand(opts.presenter);
+  const outline = (b) => `<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}"
+      fill="none" stroke="${accent}" stroke-opacity="0.55" stroke-width="3"/>`;
+
   return `
-    <g clip-path="url(#outsideBand)">${layers}</g>
-    <rect x="${BROLL.x}" y="${BROLL.y}" width="${BROLL.w}" height="${BROLL.h}"
-      fill="none" stroke="${accent}" stroke-opacity="0.55" stroke-width="3"/>
+    <g clip-path="url(#${opts.presenter ? 'outsideBands' : 'outsideBand'})">${layers}</g>
+    ${opts.broll ? outline(band) : ''}
+    ${opts.presenter ? outline(PRESENTER) : ''}
     ${rail}`;
 }
 
@@ -258,13 +288,16 @@ function buildFrameSvg(beat, idx, total, badge, themeName, opts = {}) {
   // words, so the big static headline is dropped — exactly how the reference reels
   // are built. Keeping it would also leave nowhere for it to sit: the band, the
   // headline and the caption zone cannot all fit above the footer.
-  const body = opts.broll
-    ? `${eyebrowUnderBand(eyebrow, accent)}`
+  // With the presenter in frame the two bands leave only a ~20px seam, so there is
+  // nowhere for the eyebrow to go — the lockup, day chip and footer carry the brand,
+  // and the captions carry the words. That is how the reference reels are built.
+  const body = opts.presenter ? ''
+    : opts.broll ? eyebrowUnderBand(eyebrow, accent)
     : `${eyebrowSvg}\n  ${headSvg}\n  ${ruleSvg}\n  ${subSvg}`;
 
   return `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
   <defs>${chromeDefs(accent)}</defs>
-  ${chromeBackground(accent, { broll: opts.broll })}
+  ${chromeBackground(accent, { broll: opts.broll, presenter: opts.presenter })}
   ${brandLockup(accent)}
   ${dayChip(badge, accent)}
   ${body}
@@ -301,31 +334,50 @@ function ffmpeg(args) {
  * the band and looped, because a captured page clip is usually shorter than the
  * beat it has to fill.
  */
-async function buildBrollSegment(framePath, brollPath, audioPath, dur, segPath) {
-  const args = [
-    '-y',
-    '-stream_loop', '-1', '-i', brollPath,      // loop the footage to cover the beat
-    '-loop', '1', '-framerate', String(FPS), '-i', framePath,
-  ];
+async function buildBrollSegment(framePath, brollPath, presenterPath, audioPath, dur, segPath) {
+  const band = brollBand(!!presenterPath);
+  const args = ['-y'];
+
+  // Both clips loop: a captured page runs ~8s and the presenter 5.5s, but a beat can
+  // outlast either. The presenter loop is crossfaded end-to-start so repeats do not
+  // show a visible cut.
+  const idx = {};
+  let n = 0;
+  if (brollPath) { args.push('-stream_loop', '-1', '-i', brollPath); idx.broll = n++; }
+  if (presenterPath) { args.push('-stream_loop', '-1', '-i', presenterPath); idx.presenter = n++; }
+  args.push('-loop', '1', '-framerate', String(FPS), '-i', framePath); idx.frame = n++;
   if (audioPath) args.push('-i', audioPath);
   else args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100');
+  idx.audio = n++;
 
-  // Scale-to-cover then centre-crop, so page footage of any aspect fills the band
-  // without letterboxing or distortion. A slow drift keeps the band from feeling
-  // static when the captured page happens to be still.
-  // A slight knock-down on brightness/saturation: captured pages are often pure
-  // white and blow out next to the near-black chrome, which makes the whole frame
-  // look like two unrelated images stacked.
-  const filter =
-    `[0:v]scale=${BROLL.w}:${BROLL.h}:force_original_aspect_ratio=increase,` +
-    `crop=${BROLL.w}:${BROLL.h},eq=brightness=-0.06:saturation=0.92,setsar=1,fps=${FPS}[bs];` +
-    `color=c=${INK.base}:s=${W}x${H}:r=${FPS}[bg];` +
-    `[bg][bs]overlay=${BROLL.x}:${BROLL.y}:shortest=0[withb];` +
-    `[withb][1:v]overlay=0:0:format=auto,format=yuv420p[v]`;
+  // Scale-to-cover then centre-crop, so footage of any aspect fills its band without
+  // letterboxing or distortion. Page captures are graded down slightly because a pure
+  // white page blows out next to the near-black chrome and the frame stops reading as
+  // one image.
+  const parts = [`color=c=${INK.base}:s=${W}x${H}:r=${FPS}[bg]`];
+  let prev = 'bg';
+
+  if (brollPath) {
+    parts.push(
+      `[${idx.broll}:v]scale=${band.w}:${band.h}:force_original_aspect_ratio=increase,` +
+      `crop=${band.w}:${band.h},eq=brightness=-0.06:saturation=0.92,setsar=1,fps=${FPS}[bs]`,
+      `[${prev}][bs]overlay=${band.x}:${band.y}:shortest=0[withb]`
+    );
+    prev = 'withb';
+  }
+  if (presenterPath) {
+    parts.push(
+      `[${idx.presenter}:v]scale=${PRESENTER.w}:${PRESENTER.h}:force_original_aspect_ratio=increase,` +
+      `crop=${PRESENTER.w}:${PRESENTER.h},setsar=1,fps=${FPS}[ps]`,
+      `[${prev}][ps]overlay=${PRESENTER.x}:${PRESENTER.y}:shortest=0[withp]`
+    );
+    prev = 'withp';
+  }
+  parts.push(`[${prev}][${idx.frame}:v]overlay=0:0:format=auto,format=yuv420p[v]`);
 
   args.push(
-    '-filter_complex', filter,
-    '-map', '[v]', '-map', '2:a',
+    '-filter_complex', parts.join(';'),
+    '-map', '[v]', '-map', `${idx.audio}:a`,
     '-t', dur.toFixed(2),
     '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
@@ -396,6 +448,11 @@ async function composeReel(script, opts = {}) {
     brollClip = await captureToolPage(brollUrl, { seconds: 8 }).catch(() => null);
   }
 
+  // The presenter loop is a fixed brand asset, not generated per reel — it costs
+  // credits to produce, so one clip is reused across every video.
+  const presenterClip = resolvePresenter(opts.presenter);
+  if (presenterClip) console.log(`[Reel] Presenter: ${path.basename(presenterClip)}`);
+
   // 2) Render a frame per beat
   console.log('[Reel] Rendering frames...');
   const segPaths = [];
@@ -403,7 +460,7 @@ async function composeReel(script, opts = {}) {
   let totalDur = 0;
   for (let i = 0; i < beats.length; i++) {
     const svg = buildFrameSvg(beats[i], i, beats.length, badge, themeName, {
-      captions: wantCaptions, broll: !!brollClip,
+      captions: wantCaptions, broll: !!brollClip, presenter: !!presenterClip,
     });
     const framePath = path.join(work, `frame_${i}.png`);
     await sharp(Buffer.from(svg)).png().toFile(framePath);
@@ -411,8 +468,11 @@ async function composeReel(script, opts = {}) {
     const clip = clips.find((c) => c.index === i) || { filepath: null, duration: 2.5 };
     const dur = Math.max(1.6, (clip.duration || 2.5) + 0.45); // pad so narration isn't clipped
     const segPath = path.join(work, `seg_${i}.mp4`);
-    if (brollClip) await buildBrollSegment(framePath, brollClip, clip.filepath, dur, segPath);
-    else await buildSegment(framePath, clip.filepath, dur, segPath, i % 2 === 0);
+    if (brollClip || presenterClip) {
+      await buildBrollSegment(framePath, brollClip, presenterClip, clip.filepath, dur, segPath);
+    } else {
+      await buildSegment(framePath, clip.filepath, dur, segPath, i % 2 === 0);
+    }
     segPaths.push(segPath);
     // Record where this beat lands in the finished video so captions line up.
     captionSegments.push({ words: clip.words || [], offset: totalDur });
@@ -444,7 +504,8 @@ async function composeReel(script, opts = {}) {
       const assPath = buildCaptionFile(captionSegments, {
         themeName,
         playResX: W, playResY: H,
-        marginV: brollClip ? CAPTION_MARGIN_V_BROLL : CAPTION_MARGIN_V,
+        marginV: presenterClip ? CAPTION_MARGIN_V_SPLIT
+          : brollClip ? CAPTION_MARGIN_V_BROLL : CAPTION_MARGIN_V,
         outPath: path.join(work, 'captions.ass'),
       });
       if (assPath) {

@@ -29,3 +29,6 @@ Twitter_Viral_post-main/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Presenter clip — generated asset, kept off the public repo like the old avatars
+backend/assets/presenter/
