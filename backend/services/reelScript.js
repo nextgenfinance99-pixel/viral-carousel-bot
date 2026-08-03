@@ -1,4 +1,5 @@
 const Groq = require('groq-sdk');
+const { ensureHashtags } = require('./hashtags');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -109,7 +110,9 @@ Return ONLY valid JSON:
     badge:          String(parsed.badge || (kind === 'news' ? 'AI UPDATE' : 'AI TOOL'))
                       .toUpperCase().replace(/[^A-Z0-9 ]/g, '').trim().slice(0, 14),
     beats,
-    caption:        parsed.caption || `${title}\n\n#ai #aitools #artificialintelligence #tech #automation #machinelearning`,
+    // Hashtags are enforced rather than requested — the model routinely ignored the
+    // "EXACTLY 6 hashtags" instruction, and every rundown shipped with none.
+    caption:        ensureHashtags(parsed.caption || title, { pillar: 'ai' }),
     cta:            parsed.cta || 'Follow for daily AI tools',
     narrationVoice: ['female_energetic', 'male_deep', 'female_calm'].includes(parsed.narrationVoice)
                       ? parsed.narrationVoice : 'female_energetic',
@@ -186,8 +189,10 @@ Return ONLY valid JSON:
   ];
 
   if (!caption) {
-    caption = `${list.length} AI tools you need to try${dayTag ? ` — ${dayTag}` : ''}: ${list.map((t) => t.name).join(', ')}.\n\n#ai #aitools #artificialintelligence #aitoolsdaily #tech #productivity`;
+    caption = `${list.length} AI tools you need to try${dayTag ? ` — ${dayTag}` : ''}: ${list.map((t) => t.name).join(', ')}.`;
   }
+  // This is the path that shipped four days of rundowns with no hashtags at all.
+  caption = ensureHashtags(caption, { pillar: 'ai' });
 
   return {
     title: dayTag ? `${dayTag}: ${list.length} AI tools` : `${list.length} AI tools`,
@@ -249,10 +254,10 @@ Return ONLY valid JSON:
     console.log(`[HowTo] Groq failed for ${name}, using fallback: ${e.message}`);
   }
 
-  if (!caption) {
-    const tag = name.replace(/[^a-z0-9]/gi, '').toLowerCase();
-    caption = `How to use ${name} in seconds.\n\n#ai #aitools #${tag || 'aitool'} #howto #artificialintelligence #productivity`;
-  }
+  if (!caption) caption = `How to use ${name} in seconds.`;
+  // Passing toolName lets the tool's own tag lead, but sanitised — raw names like
+  // "LTX2.3" produce a tag Instagram truncates at the period.
+  caption = ensureHashtags(caption, { pillar: 'ai', toolName: name });
 
   return {
     title: `How to use ${name}`,
