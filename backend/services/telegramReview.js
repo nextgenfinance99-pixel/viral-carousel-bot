@@ -117,4 +117,10 @@ function start() {
   tg.startPolling({ onCallback, onMessage });
 }
 
-module.exports = { start, pushDraft, pushAsset, isOn };
+// Send a plain operational alert (token expiry, failed run) to the review chat.
+async function notify(html) {
+  if (!isOn()) return;
+  await tg.sendMessage(html);
+}
+
+module.exports = { start, pushDraft, pushAsset, isOn, notify };

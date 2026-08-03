@@ -5,7 +5,9 @@ const fs = require('fs');
 const BASE_URL = 'https://graph.instagram.com/v19.0';
 
 function getCredentials() {
-  const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
+  // Token comes from the self-refreshing store, not straight from .env — a
+  // refreshed token is a new string and would otherwise be lost on restart.
+  const accessToken = require('./instagramToken').getToken();
   const userId = process.env.INSTAGRAM_USER_ID;
   if (!accessToken || !userId) throw new Error('Instagram credentials not configured in .env');
   return { accessToken, userId };
@@ -115,13 +117,17 @@ async function createCarouselContainer(childIds, caption) {
 // Publish the carousel
 async function publishMedia(containerId) {
   const { accessToken, userId } = getCredentials();
-  const res = await axios.post(`${BASE_URL}/${userId}/media_publish`, null, {
-    params: {
-      creation_id: containerId,
-      access_token: accessToken,
-    },
-  });
-  return res.data.id;
+  try {
+    const res = await axios.post(`${BASE_URL}/${userId}/media_publish`, null, {
+      params: {
+        creation_id: containerId,
+        access_token: accessToken,
+      },
+    });
+    return res.data.id;
+  } catch (e) {
+    throw apiError(e, 'Publishing failed');
+  }
 }
 
 async function postCarousel(imagePaths, caption) {
@@ -157,14 +163,31 @@ async function postCarousel(imagePaths, caption) {
 
 // Post a single vertical video as a Reel. IG processes the video async, so we
 // create the REELS container, poll until it's FINISHED, then publish.
+// Turn Graph API errors into something readable. A bare "status code 400" gives
+// no clue that, say, the access token expired overnight.
+function apiError(e, stage) {
+  const err = e.response?.data?.error;
+  if (!err) return new Error(`${stage}: ${e.message}`);
+  const expired = err.code === 190;
+  return new Error(
+    `${stage}: ${err.message}${err.code ? ` (code ${err.code})` : ''}` +
+    (expired ? ' — the Instagram token needs regenerating in the Meta app' : '')
+  );
+}
+
 async function postReel(videoPath, caption) {
   const { accessToken, userId } = getCredentials();
   const videoUrl = await uploadFileToHost(videoPath);
 
   console.log('[Instagram] Creating REELS container...');
-  const create = await axios.post(`${BASE_URL}/${userId}/media`, null, {
-    params: { media_type: 'REELS', video_url: videoUrl, caption, access_token: accessToken },
-  });
+  let create;
+  try {
+    create = await axios.post(`${BASE_URL}/${userId}/media`, null, {
+      params: { media_type: 'REELS', video_url: videoUrl, caption, access_token: accessToken },
+    });
+  } catch (e) {
+    throw apiError(e, 'Creating reel container failed');
+  }
   const containerId = create.data.id;
 
   // Poll container status (video transcode can take a while)
