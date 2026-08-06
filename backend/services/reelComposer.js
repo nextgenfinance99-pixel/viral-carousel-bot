@@ -127,6 +127,16 @@ const BROLL = { x: 0, y: 356, w: W, h: 800 };
 const BROLL_SPLIT = { x: 0, y: 356, w: W, h: 604 };
 const PRESENTER = { x: 0, y: 980, w: W, h: 540 };
 
+// Three framings cut out of the ONE presenter clip, in source coordinates
+// (1280x720). Generating more footage costs credits; re-framing costs nothing, and
+// cutting between a wide, a medium and a close-up is what stops a 5.5s loop reading
+// as a loop across a 25s reel. Real edits change shot size — this fakes that for free.
+const PRESENTER_SHOTS = [
+  { name: 'wide',   w: 1280, h: 720, x: 0,   y: 0  },
+  { name: 'medium', w: 1000, h: 563, x: 180, y: 40 },
+  { name: 'close',  w: 700,  h: 394, x: 340, y: 20 },
+];
+
 // The presenter loop lives here; absent just means the reel renders without it.
 const PRESENTER_CLIP = path.join(__dirname, '../assets/presenter/presenter.mp4');
 function resolvePresenter(opt) {
@@ -334,7 +344,7 @@ function ffmpeg(args) {
  * the band and looped, because a captured page clip is usually shorter than the
  * beat it has to fill.
  */
-async function buildBrollSegment(framePath, brollPath, presenterPath, audioPath, dur, segPath) {
+async function buildBrollSegment(framePath, brollPath, presenterPath, audioPath, dur, segPath, beatIdx = 0) {
   const band = brollBand(!!presenterPath);
   const args = ['-y'];
 
@@ -344,7 +354,13 @@ async function buildBrollSegment(framePath, brollPath, presenterPath, audioPath,
   const idx = {};
   let n = 0;
   if (brollPath) { args.push('-stream_loop', '-1', '-i', brollPath); idx.broll = n++; }
-  if (presenterPath) { args.push('-stream_loop', '-1', '-i', presenterPath); idx.presenter = n++; }
+  if (presenterPath) {
+    // Start each beat at a different point in the loop as well as a different shot
+    // size, so two beats never show the identical gesture at the identical moment.
+    const seek = ((beatIdx * 1.7) % 5).toFixed(2);
+    args.push('-stream_loop', '-1', '-ss', seek, '-i', presenterPath);
+    idx.presenter = n++;
+  }
   args.push('-loop', '1', '-framerate', String(FPS), '-i', framePath); idx.frame = n++;
   if (audioPath) args.push('-i', audioPath);
   else args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100');
@@ -366,8 +382,11 @@ async function buildBrollSegment(framePath, brollPath, presenterPath, audioPath,
     prev = 'withb';
   }
   if (presenterPath) {
+    // Crop the chosen framing out of the source FIRST, then fit it to the band.
+    const shot = PRESENTER_SHOTS[beatIdx % PRESENTER_SHOTS.length];
     parts.push(
-      `[${idx.presenter}:v]scale=${PRESENTER.w}:${PRESENTER.h}:force_original_aspect_ratio=increase,` +
+      `[${idx.presenter}:v]crop=${shot.w}:${shot.h}:${shot.x}:${shot.y},` +
+      `scale=${PRESENTER.w}:${PRESENTER.h}:force_original_aspect_ratio=increase,` +
       `crop=${PRESENTER.w}:${PRESENTER.h},setsar=1,fps=${FPS}[ps]`,
       `[${prev}][ps]overlay=${PRESENTER.x}:${PRESENTER.y}:shortest=0[withp]`
     );
@@ -469,7 +488,7 @@ async function composeReel(script, opts = {}) {
     const dur = Math.max(1.6, (clip.duration || 2.5) + 0.45); // pad so narration isn't clipped
     const segPath = path.join(work, `seg_${i}.mp4`);
     if (brollClip || presenterClip) {
-      await buildBrollSegment(framePath, brollClip, presenterClip, clip.filepath, dur, segPath);
+      await buildBrollSegment(framePath, brollClip, presenterClip, clip.filepath, dur, segPath, i);
     } else {
       await buildSegment(framePath, clip.filepath, dur, segPath, i % 2 === 0);
     }
@@ -492,6 +511,11 @@ async function composeReel(script, opts = {}) {
   console.log('[Reel] Concatenating segments...');
   await ffmpeg([
     '-y', '-f', 'concat', '-safe', '0', '-i', listPath,
+    // Raw Edge TTS comes out quiet and its level drifts between beats, because each
+    // beat is a separate synthesis. loudnorm pins the whole reel to -14 LUFS, which
+    // is what Instagram normalises to anyway — matching it here means IG does not
+    // pull the level around on playback.
+    '-af', 'loudnorm=I=-14:TP=-1.5:LRA=11',
     '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart',
     outPath,
