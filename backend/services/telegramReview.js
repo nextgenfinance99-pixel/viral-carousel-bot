@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const tg = require('./telegram');
 const { getDraft, getAsset, updateAsset, publishAsset, regenerateAsset } = require('./dailyChallenge');
 
@@ -90,11 +92,31 @@ async function onMessage(msg) {
     return;
   }
 
+  // A VIDEO sets the presenter clip. This is the only way to get it onto the Render
+  // disk: the repo is public, so the avatar is deliberately git-ignored and is not in
+  // the image. Distinct from the banned host PHOTO — a still face held for a whole
+  // reel is the thing that was removed; this is the moving presenter the split-screen
+  // format needs, and the user asked for it explicitly.
+  const vid = msg.video || (msg.document && /^video\//.test(msg.document.mime_type || '') ? msg.document : null);
+  if (vid) {
+    try {
+      const destDir = path.join(__dirname, '../assets/presenter');
+      fs.mkdirSync(destDir, { recursive: true });
+      const dest = path.join(destDir, 'presenter.mp4');
+      await tg.downloadFile(vid.file_id, dest);
+      const mb = (fs.statSync(dest).size / 1048576).toFixed(1);
+      await tg.sendMessage(`🎬 Presenter clip saved (${mb}MB). It will appear beneath the B-roll in the next reel.`, undefined, chatId);
+    } catch (e) {
+      await tg.sendMessage(`⚠️ Could not save that video: ${e.message}`, undefined, chatId);
+    }
+    return;
+  }
+
   const text = (msg.text || '').trim();
   if (!text) return;
 
   if (text === '/start' || text === '/help' || text === '/id') {
-    await tg.sendMessage(`👋 Connected! This is your DEVELOPSCHL reel review bot.\nYour chat id is <code>${chatId}</code>.\n\n• Daily drafts arrive here — tap ✅ to post, ✏️ to request changes (reply with notes), ⏭ to skip.\n• Reels are drawn entirely from the brand template — there are no host images to upload.`, undefined, chatId);
+    await tg.sendMessage(`👋 Connected! This is your DEVELOPSCHL reel review bot.\nYour chat id is <code>${chatId}</code>.\n\n• Daily drafts arrive here — tap ✅ to post, ✏️ to request changes (reply with notes), ⏭ to skip.\n• Reels are drawn from the brand template. Send a VIDEO to set the presenter clip that sits under the B-roll (photos are not used).`, undefined, chatId);
     return;
   }
 
