@@ -17,6 +17,7 @@
  * user deliberately replacing it.
  */
 const fs = require('fs');
+const crypto = require('crypto');
 const path = require('path');
 const axios = require('axios');
 
@@ -38,6 +39,20 @@ function writeStore(store) {
   fs.writeFileSync(TOKEN_FILE, JSON.stringify(store, null, 2));
 }
 
+// Fingerprint of the .env token, used only to notice when the user pastes a
+// replacement. Storing the raw value here kept a second live credential on disk for
+// no benefit — a hash answers "did this change?" exactly as well.
+function fingerprint(token) {
+  return token ? crypto.createHash('sha256').update(token).digest('hex').slice(0, 16) : null;
+}
+
+// Older stores kept the raw token in seededFrom; accept either so an existing file
+// keeps working, and it gets rewritten as a hash on the next seed.
+function matchesSeed(store, envToken) {
+  if (!store || !envToken) return false;
+  return store.seededFrom === fingerprint(envToken) || store.seededFrom === envToken;
+}
+
 /**
  * The token to use right now.
  * Prefers a stored (possibly refreshed) token, unless .env holds a different one,
@@ -48,14 +63,14 @@ function getToken() {
   const store = readStore();
 
   if (store && store.token) {
-    if (!envToken || store.seededFrom === envToken) return store.token;
+    if (!envToken || matchesSeed(store, envToken)) return store.token;
     // .env changed → user replaced the token by hand. Re-seed from it.
     console.log('[IGToken] .env token differs from the stored one — adopting the new token');
-    writeStore({ token: envToken, seededFrom: envToken, expiresAt: null, refreshedAt: null });
+    writeStore({ token: envToken, seededFrom: fingerprint(envToken), expiresAt: null, refreshedAt: null });
     return envToken;
   }
 
-  if (envToken) writeStore({ token: envToken, seededFrom: envToken, expiresAt: null, refreshedAt: null });
+  if (envToken) writeStore({ token: envToken, seededFrom: fingerprint(envToken), expiresAt: null, refreshedAt: null });
   return envToken;
 }
 
@@ -94,7 +109,7 @@ async function refreshIfNeeded(force = false) {
     const newExpiry = new Date(Date.now() + expiresIn * 1000).toISOString();
     writeStore({
       token: newToken,
-      seededFrom: process.env.INSTAGRAM_ACCESS_TOKEN || null,
+      seededFrom: fingerprint(process.env.INSTAGRAM_ACCESS_TOKEN),
       expiresAt: newExpiry,
       refreshedAt: new Date().toISOString(),
     });

@@ -24,6 +24,7 @@
  *    claim unless the source text supports it, and no invented numbers.
  */
 const Groq = require('groq-sdk');
+const { CHAT_MODEL, assertModelAlive } = require('../llm');
 
 // Constructed on first use, not at import. The formatting helpers below are pure and
 // are the part most worth testing, and building the client eagerly made the whole
@@ -181,15 +182,16 @@ Return ONLY valid JSON:
   let parsed = {};
   try {
     const completion = await groqClient().chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+      model: CHAT_MODEL,
       messages: [
         { role: 'system', content: 'You write X threads that developers actually read. Respond with valid JSON only.' },
         { role: 'user', content: prompt },
       ],
-      temperature: 0.85, max_tokens: 2000, response_format: { type: 'json_object' },
+      temperature: 0.85, max_tokens: 4000, response_format: { type: 'json_object' },
     });
     parsed = parseLenientJSON(completion.choices[0].message.content);
   } catch (e) {
+    assertModelAlive(e, 'X');
     console.log(`[X] Groq failed for "${title}": ${e.message}`);
   }
 

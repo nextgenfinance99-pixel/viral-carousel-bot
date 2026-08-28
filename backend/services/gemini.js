@@ -1,4 +1,5 @@
 const Groq = require('groq-sdk');
+const { CHAT_MODEL, assertModelAlive } = require('../llm');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
@@ -43,7 +44,7 @@ Return ONLY valid JSON:
 }`;
 
   const completion = await groq.chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
+    model: CHAT_MODEL,
     messages: [
       {
         role: 'system',

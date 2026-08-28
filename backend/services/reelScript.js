@@ -1,4 +1,5 @@
 const Groq = require('groq-sdk');
+const { CHAT_MODEL, assertModelAlive } = require('../llm');
 const { ensureHashtags } = require('./hashtags');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -76,7 +77,7 @@ Return ONLY valid JSON:
 }`;
 
   const completion = await groq.chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
+    model: CHAT_MODEL,
     messages: [
       {
         role: 'system',
@@ -85,7 +86,7 @@ Return ONLY valid JSON:
       { role: 'user', content: prompt },
     ],
     temperature: 0.8,
-    max_tokens: 2000,
+    max_tokens: 4000,
     response_format: { type: 'json_object' },
   });
 
@@ -161,12 +162,12 @@ Return ONLY valid JSON:
   "caption": "1-2 line caption then a newline then EXACTLY 6 relevant hashtags"
 }`;
     const completion = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+      model: CHAT_MODEL,
       messages: [
         { role: 'system', content: 'You write viral faceless short-form scripts. Respond with valid JSON only.' },
         { role: 'user', content: prompt },
       ],
-      temperature: 0.8, max_tokens: 1500, response_format: { type: 'json_object' },
+      temperature: 0.8, max_tokens: 3000, response_format: { type: 'json_object' },
     });
     const parsed = parseLenientJSON(completion.choices[0].message.content);
     if (parsed.hook) hook = String(parsed.hook).toUpperCase().slice(0, 40);
@@ -176,6 +177,7 @@ Return ONLY valid JSON:
     if (parsed.cta) cta = String(parsed.cta).trim();
     if (parsed.caption) caption = String(parsed.caption).trim();
   } catch (e) {
+    assertModelAlive(e, 'Rundown');
     console.log(`[Rundown] Groq enrich failed, using taglines: ${e.message}`);
   }
 
@@ -238,12 +240,12 @@ Return ONLY valid JSON:
   "caption": "1 line then a newline then EXACTLY 6 hashtags including the tool name"
 }`;
     const completion = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+      model: CHAT_MODEL,
       messages: [
         { role: 'system', content: 'You write viral faceless short-form scripts. Respond with valid JSON only.' },
         { role: 'user', content: prompt },
       ],
-      temperature: 0.75, max_tokens: 700, response_format: { type: 'json_object' },
+      temperature: 0.75, max_tokens: 2500, response_format: { type: 'json_object' },
     });
     const parsed = parseLenientJSON(completion.choices[0].message.content);
     if (parsed.hook) hook = String(parsed.hook).toUpperCase().slice(0, 40);
@@ -251,6 +253,7 @@ Return ONLY valid JSON:
     if (parsed.stepNarration) stepNarration = String(parsed.stepNarration).trim();
     if (parsed.caption) caption = String(parsed.caption).trim();
   } catch (e) {
+    assertModelAlive(e, 'HowTo');
     console.log(`[HowTo] Groq failed for ${name}, using fallback: ${e.message}`);
   }
 
@@ -360,15 +363,16 @@ Return ONLY valid JSON:
   let parsed = {};
   try {
     const completion = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+      model: CHAT_MODEL,
       messages: [
         { role: 'system', content: 'You write viral faceless short-form video scripts. Respond with valid JSON only.' },
         { role: 'user', content: prompt },
       ],
-      temperature: 0.85, max_tokens: 1600, response_format: { type: 'json_object' },
+      temperature: 0.85, max_tokens: 4000, response_format: { type: 'json_object' },
     });
     parsed = parseLenientJSON(completion.choices[0].message.content);
   } catch (e) {
+    assertModelAlive(e, 'Spotlight');
     console.log(`[Spotlight] Groq failed for ${name}: ${e.message}`);
   }
 
