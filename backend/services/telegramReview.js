@@ -1,27 +1,7 @@
+const fs = require('fs');
 const path = require('path');
-const sharp = require('sharp');
 const tg = require('./telegram');
-const { getDraft, getAsset, updateAsset, publishAsset, regenerateAsset } = require('./dailyChallenge');
-
-const AVATARS_DIR = path.join(__dirname, '../assets/avatars');
-const VALID_SLOTS = ['host', 'boy', 'girl'];
-
-// Save a photo the user sent as a host/avatar image (slot from the caption).
-async function setAvatarFromPhoto(fileId, captionRaw, chatId) {
-  const slot = VALID_SLOTS.includes(String(captionRaw || '').trim().toLowerCase())
-    ? String(captionRaw).trim().toLowerCase() : 'host';
-  const tmp = path.join(AVATARS_DIR, `_incoming_${Date.now()}`);
-  try {
-    await tg.downloadFile(fileId, tmp);
-    await sharp(tmp).resize(1280, 1280, { fit: 'inside', withoutEnlargement: true }).png()
-      .toFile(path.join(AVATARS_DIR, `${slot}.png`));
-    await tg.sendMessage(`✅ Updated the <b>${slot}</b> image. New reels will use it.${slot === 'host' ? '' : `\n(Tip: add a caption "host", "boy" or "girl" with the photo to target a slot.)`}`, undefined, chatId);
-  } catch (e) {
-    await tg.sendMessage(`❌ Could not save that image: ${e.message}`, undefined, chatId);
-  } finally {
-    try { require('fs').rmSync(tmp, { force: true }); } catch {}
-  }
-}
+const { getDraft, getAsset, updateAsset, publishAsset, regenerateAsset, postDailyStory } = require('./dailyChallenge');
 
 // Chats awaiting a free-text "what changes?" reply → { dateKey, assetId, title }
 const pendingFeedback = new Map();
@@ -75,6 +55,21 @@ async function onCallback(cb) {
   const asset = getAsset(dateKey, assetId);
   if (!asset) { await tg.answerCallback(cb.id, 'That draft is no longer available.'); return; }
 
+  // Story recap: 'st' renders a preview, 'sy' publishes it. Same review-first rule
+  // as every other asset — a Story is public the moment it lands.
+  if (action === 'sy') {
+    await tg.answerCallback(cb.id, 'Posting story…');
+    try {
+      const r = await postDailyStory(dateKey, { force: true });
+      await tg.sendMessage(r.ok
+        ? `📸 Story posted — covering ${r.count} post(s).`
+        : `⚠️ Story not posted: ${r.reason}`, undefined, chatId);
+    } catch (e) {
+      await tg.sendMessage(`⚠️ Story failed: ${e.message}`, undefined, chatId);
+    }
+    return;
+  }
+
   if (action === 'ap') {
     await tg.answerCallback(cb.id, 'Posting to Instagram…');
     await tg.editCaption(chatId, messageId, assetCaption(asset, '⏳ Posting… '));
@@ -105,21 +100,54 @@ async function onCallback(cb) {
 async function onMessage(msg) {
   const chatId = String(msg.chat?.id || '');
 
-  // A photo (or image file) → update a host/avatar slot.
-  if (msg.photo && msg.photo.length) {
-    await setAvatarFromPhoto(msg.photo[msg.photo.length - 1].file_id, msg.caption, chatId);
+  // Photos used to set a host image. That system is gone — reels are drawn
+  // entirely from code — so say so rather than silently ignoring the upload.
+  if ((msg.photo && msg.photo.length) || (msg.document && /^image\//.test(msg.document.mime_type || ''))) {
+    await tg.sendMessage('📷 Reels are generated from the brand template now — host images are no longer used, so this photo was not saved.', undefined, chatId);
     return;
   }
-  if (msg.document && /^image\//.test(msg.document.mime_type || '')) {
-    await setAvatarFromPhoto(msg.document.file_id, msg.caption, chatId);
+
+  // A VIDEO sets the presenter clip. This is the only way to get it onto the Render
+  // disk: the repo is public, so the avatar is deliberately git-ignored and is not in
+  // the image. Distinct from the banned host PHOTO — a still face held for a whole
+  // reel is the thing that was removed; this is the moving presenter the split-screen
+  // format needs, and the user asked for it explicitly.
+  const vid = msg.video || (msg.document && /^video\//.test(msg.document.mime_type || '') ? msg.document : null);
+  if (vid) {
+    try {
+      const destDir = path.join(__dirname, '../assets/presenter');
+      fs.mkdirSync(destDir, { recursive: true });
+      const dest = path.join(destDir, 'presenter.mp4');
+      await tg.downloadFile(vid.file_id, dest);
+      const mb = (fs.statSync(dest).size / 1048576).toFixed(1);
+      await tg.sendMessage(`🎬 Presenter clip saved (${mb}MB). It will appear beneath the B-roll in the next reel.`, undefined, chatId);
+    } catch (e) {
+      await tg.sendMessage(`⚠️ Could not save that video: ${e.message}`, undefined, chatId);
+    }
     return;
   }
 
   const text = (msg.text || '').trim();
   if (!text) return;
 
+  if (text === '/story') {
+    try {
+      const r = await postDailyStory(undefined, { renderOnly: true, force: true });
+      if (!r.ok) { await tg.sendMessage(`No story: ${r.reason}`, undefined, chatId); return; }
+      const today = new Date();
+      const key = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      await tg.sendPhoto(r.filepath, `📸 Story recap — ${r.count} post(s) today. Post it?`, {
+        inline_keyboard: [[{ text: '✅ Post story', callback_data: `sy:${key}:-` }]],
+      }, chatId);
+    } catch (e) {
+      await tg.sendMessage(`⚠️ Story preview failed: ${e.message}`, undefined, chatId);
+    }
+    return;
+  }
+
   if (text === '/start' || text === '/help' || text === '/id') {
-    await tg.sendMessage(`👋 Connected! This is your DEVELOPSCHL reel review bot.\nYour chat id is <code>${chatId}</code>.\n\n• Daily drafts arrive here — tap ✅ to post, ✏️ to request changes (reply with notes), ⏭ to skip.\n• <b>Change pictures:</b> just send me a photo to update your host intro image (add caption "boy" or "girl" to set those instead).`, undefined, chatId);
+    await tg.sendMessage(`👋 Connected! This is your DEVELOPSCHL reel review bot.\nYour chat id is <code>${chatId}</code>.\n\n• Daily drafts arrive here — tap ✅ to post, ✏️ to request changes (reply with notes), ⏭ to skip.\n• Reels are drawn from the brand template. Send a VIDEO to set the presenter clip that sits under the B-roll (photos are not used).
+• /story — preview and post a Story recapping everything posted today.`, undefined, chatId);
     return;
   }
 
@@ -142,4 +170,10 @@ function start() {
   tg.startPolling({ onCallback, onMessage });
 }
 
-module.exports = { start, pushDraft, pushAsset, isOn };
+// Send a plain operational alert (token expiry, failed run) to the review chat.
+async function notify(html) {
+  if (!isOn()) return;
+  await tg.sendMessage(html);
+}
+
+module.exports = { start, pushDraft, pushAsset, isOn, notify };

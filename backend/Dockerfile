@@ -20,6 +20,14 @@ RUN printf '%s\n' \
 WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
+
+# Chromium for the B-roll screen capture. The npm package alone is not enough —
+# Playwright downloads the browser binary separately, and without this step every
+# capture fails and each reel silently falls back to the plain template, so the
+# cloud build would quietly produce worse reels than a laptop does.
+# --with-deps pulls the shared libraries headless Chromium needs on slim images.
+RUN npx playwright install --with-deps chromium     && rm -rf /var/lib/apt/lists/*
+
 COPY . .
 RUN chmod +x docker-entrypoint.sh
 

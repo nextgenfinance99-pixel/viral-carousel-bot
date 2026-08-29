@@ -5,25 +5,86 @@ const fs = require('fs');
 const BASE_URL = 'https://graph.instagram.com/v19.0';
 
 function getCredentials() {
-  const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
+  // Token comes from the self-refreshing store, not straight from .env — a
+  // refreshed token is a new string and would otherwise be lost on restart.
+  const accessToken = require('./instagramToken').getToken();
   const userId = process.env.INSTAGRAM_USER_ID;
   if (!accessToken || !userId) throw new Error('Instagram credentials not configured in .env');
   return { accessToken, userId };
 }
 
-// Upload image to catbox.moe (free, no auth, permanent hosting)
-async function uploadImageToHost(filepath) {
-  const form = new FormData();
-  form.append('reqtype', 'fileupload');
-  form.append('fileToUpload', fs.createReadStream(filepath));
-  const res = await axios.post('https://catbox.moe/user/api.php', form, {
-    headers: form.getHeaders(),
-    timeout: 30000,
-  });
-  const url = res.data.trim();
-  console.log(`[Instagram] Uploaded image → ${url}`);
-  return url;
+// ── PUBLIC FILE HOSTING ───────────────────────────────────────────────────────
+// Instagram fetches media by URL, so every asset needs a temporary public link.
+// Providers are tried in order — catbox started returning 412 "Invalid uploader"
+// for anonymous uploads, so it is no longer the primary. Each provider only has
+// to outlive the container transcode (a couple of minutes), not the post itself.
+const FILE_HOSTS = [
+  {
+    name: 'litterbox',
+    async upload(filepath) {
+      const form = new FormData();
+      form.append('reqtype', 'fileupload');
+      form.append('time', '72h');
+      form.append('fileToUpload', fs.createReadStream(filepath));
+      const res = await axios.post('https://litterbox.catbox.moe/resources/internals/api.php', form, {
+        headers: form.getHeaders(), timeout: 120000,
+        maxBodyLength: Infinity, maxContentLength: Infinity,
+      });
+      const url = String(res.data).trim();
+      if (!/^https?:\/\//.test(url)) throw new Error(url.slice(0, 120));
+      return url;
+    },
+  },
+  {
+    name: 'tmpfiles',
+    async upload(filepath) {
+      const form = new FormData();
+      form.append('file', fs.createReadStream(filepath));
+      const res = await axios.post('https://tmpfiles.org/api/v1/upload', form, {
+        headers: form.getHeaders(), timeout: 120000,
+        maxBodyLength: Infinity, maxContentLength: Infinity,
+      });
+      const page = res.data?.data?.url;
+      if (!page) throw new Error(JSON.stringify(res.data).slice(0, 120));
+      // The API returns a viewer page; IG needs the direct file, which lives under /dl/.
+      return page.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+    },
+  },
+  {
+    name: 'catbox',
+    async upload(filepath) {
+      const form = new FormData();
+      form.append('reqtype', 'fileupload');
+      form.append('fileToUpload', fs.createReadStream(filepath));
+      const res = await axios.post('https://catbox.moe/user/api.php', form, {
+        headers: form.getHeaders(), timeout: 120000,
+        maxBodyLength: Infinity, maxContentLength: Infinity,
+      });
+      const url = String(res.data).trim();
+      if (!/^https?:\/\//.test(url)) throw new Error(url.slice(0, 120));
+      return url;
+    },
+  },
+];
+
+// Upload any file (image or mp4) and return a public URL Instagram can fetch.
+async function uploadFileToHost(filepath) {
+  const failures = [];
+  for (const host of FILE_HOSTS) {
+    try {
+      const url = await host.upload(filepath);
+      console.log(`[Instagram] Uploaded via ${host.name} → ${url}`);
+      return url;
+    } catch (e) {
+      const why = e.response ? `${e.response.status} ${String(e.response.data).slice(0, 60)}` : e.message;
+      console.log(`[Instagram] Host ${host.name} failed: ${why}`);
+      failures.push(`${host.name}: ${why}`);
+    }
+  }
+  throw new Error(`All file hosts failed — ${failures.join(' | ')}`);
 }
+
+const uploadImageToHost = uploadFileToHost;
 
 // Create a single carousel item container (not published on its own)
 async function createCarouselItem(imageUrl) {
@@ -56,13 +117,17 @@ async function createCarouselContainer(childIds, caption) {
 // Publish the carousel
 async function publishMedia(containerId) {
   const { accessToken, userId } = getCredentials();
-  const res = await axios.post(`${BASE_URL}/${userId}/media_publish`, null, {
-    params: {
-      creation_id: containerId,
-      access_token: accessToken,
-    },
-  });
-  return res.data.id;
+  try {
+    const res = await axios.post(`${BASE_URL}/${userId}/media_publish`, null, {
+      params: {
+        creation_id: containerId,
+        access_token: accessToken,
+      },
+    });
+    return res.data.id;
+  } catch (e) {
+    throw apiError(e, 'Publishing failed');
+  }
 }
 
 async function postCarousel(imagePaths, caption) {
@@ -96,29 +161,33 @@ async function postCarousel(imagePaths, caption) {
   return postId;
 }
 
-// Upload any file (incl. mp4) to catbox.moe — IG needs a public URL to fetch.
-async function uploadFileToHost(filepath) {
-  const form = new FormData();
-  form.append('reqtype', 'fileupload');
-  form.append('fileToUpload', fs.createReadStream(filepath));
-  const res = await axios.post('https://catbox.moe/user/api.php', form, {
-    headers: form.getHeaders(), timeout: 120000, maxBodyLength: Infinity, maxContentLength: Infinity,
-  });
-  const url = res.data.trim();
-  console.log(`[Instagram] Uploaded file → ${url}`);
-  return url;
-}
-
 // Post a single vertical video as a Reel. IG processes the video async, so we
 // create the REELS container, poll until it's FINISHED, then publish.
+// Turn Graph API errors into something readable. A bare "status code 400" gives
+// no clue that, say, the access token expired overnight.
+function apiError(e, stage) {
+  const err = e.response?.data?.error;
+  if (!err) return new Error(`${stage}: ${e.message}`);
+  const expired = err.code === 190;
+  return new Error(
+    `${stage}: ${err.message}${err.code ? ` (code ${err.code})` : ''}` +
+    (expired ? ' — the Instagram token needs regenerating in the Meta app' : '')
+  );
+}
+
 async function postReel(videoPath, caption) {
   const { accessToken, userId } = getCredentials();
   const videoUrl = await uploadFileToHost(videoPath);
 
   console.log('[Instagram] Creating REELS container...');
-  const create = await axios.post(`${BASE_URL}/${userId}/media`, null, {
-    params: { media_type: 'REELS', video_url: videoUrl, caption, access_token: accessToken },
-  });
+  let create;
+  try {
+    create = await axios.post(`${BASE_URL}/${userId}/media`, null, {
+      params: { media_type: 'REELS', video_url: videoUrl, caption, access_token: accessToken },
+    });
+  } catch (e) {
+    throw apiError(e, 'Creating reel container failed');
+  }
   const containerId = create.data.id;
 
   // Poll container status (video transcode can take a while)
@@ -139,4 +208,29 @@ async function postReel(videoPath, caption) {
   return postId;
 }
 
-module.exports = { postCarousel, postReel };
+/**
+ * Post an image Story.
+ *
+ * Stories take a still directly — no transcode, so unlike REELS there is nothing to
+ * poll and the whole call is one create + one publish. Story containers still expire
+ * after 24h like any other, but we publish immediately.
+ */
+async function postStory(imagePath) {
+  const { accessToken, userId } = getCredentials();
+  const imageUrl = await uploadFileToHost(imagePath);
+
+  let create;
+  try {
+    create = await axios.post(`${BASE_URL}/${userId}/media`, null, {
+      params: { media_type: 'STORIES', image_url: imageUrl, access_token: accessToken },
+    });
+  } catch (e) {
+    throw apiError(e, 'Creating story container failed');
+  }
+
+  const postId = await publishMedia(create.data.id);
+  console.log(`[Instagram] Published Story: ${postId}`);
+  return postId;
+}
+
+module.exports = { postCarousel, postReel, postStory };

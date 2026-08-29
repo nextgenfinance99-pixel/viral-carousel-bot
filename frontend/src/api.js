@@ -23,18 +23,6 @@ export const generateSlides = (article, topic) =>
 export const generateReel = (payload) =>
   api.post('/reel/generate', payload, { timeout: 180000 }).then((r) => r.data);
 
-// Upload a host/avatar image. slot: 'host' | 'boy' | 'girl'
-export const uploadReelAsset = (slot, imageFile) => {
-  const form = new FormData();
-  form.append('slot', slot);
-  form.append('image', imageFile);
-  return api.post('/reel/asset', form, { headers: { 'Content-Type': 'multipart/form-data' } }).then((r) => r.data);
-};
-
-export const getReelAssets = ()        => api.get('/reel/assets').then((r) => r.data);
-export const getReelIntro  = ()        => api.get('/reel/intro').then((r) => r.data);
-export const saveReelIntro = (payload) => api.post('/reel/intro', payload).then((r) => r.data);
-
 export const postCarousel = (imagePaths, caption, articleUrl) =>
   api.post('/instagram/carousel', { imagePaths, caption, articleUrl }).then((r) => r.data);
 
