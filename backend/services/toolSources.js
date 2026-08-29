@@ -77,31 +77,32 @@ function norm(o) {
 }
 
 // ── 1) PRODUCT HUNT (best daily-launch feed) ──────────────────────────────────
+// Uses the public Atom feed, not the GraphQL API. The API needs a
+// PRODUCTHUNT_TOKEN that was never set, so this source silently contributed
+// nothing for the whole life of the project. The feed is keyless, needs no
+// account, and carries the tagline — which is the part the quality gate needs.
 async function fromProductHunt() {
-  const token = process.env.PRODUCTHUNT_TOKEN;
-  if (!token) { console.log('[ToolSrc] ProductHunt skipped (no PRODUCTHUNT_TOKEN)'); return []; }
-  const query = `query {
-    posts(order: VOTES, first: 30, postedAfter: "${new Date(Date.now() - 36 * 3600 * 1000).toISOString()}") {
-      edges { node { name tagline description url votesCount topics { edges { node { name } } } } }
-    }
-  }`;
   try {
-    const res = await axios.post(
-      'https://api.producthunt.com/v2/api/graphql',
-      { query },
-      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 12000 }
-    );
-    const edges = res.data?.data?.posts?.edges || [];
-    return edges
-      .map((e) => e.node)
-      .filter((n) => {
-        const topics = (n.topics?.edges || []).map((t) => t.node.name.toLowerCase()).join(' ');
-        return /\bai\b|artificial intelligence|machine learning|gpt|llm/.test(`${topics} ${n.tagline} ${n.name}`.toLowerCase());
-      })
-      .map((n) => norm({
-        name: n.name, tagline: n.tagline, description: n.description, url: n.url,
-        source: 'ProductHunt', votes: n.votesCount, isNew: true, launchedAt: new Date().toISOString(),
+    const res = await axios.get('https://www.producthunt.com/feed', { headers: HEADERS, timeout: 12000 });
+    const $ = cheerio.load(res.data, { xmlMode: true });   // Atom: <entry>, not <item>
+    const out = [];
+    $('entry').each((_, el) => {
+      const name = $(el).find('title').first().text().trim();
+      const url = $(el).find('link').first().attr('href') || '';
+      // The feed appends "Discussion | Link" navigation to every entry body.
+      const desc = $(el).find('content').first().text()
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s*Discussion\s*\|\s*Link\s*$/i, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!name || !url) return;
+      out.push(norm({
+        name, tagline: desc, description: desc, url,
+        source: 'ProductHunt', isNew: true,
+        launchedAt: $(el).find('published').first().text() || null,
       }));
+    });
+    return out;
   } catch (e) {
     console.log(`[ToolSrc] ProductHunt failed: ${e.message}`);
     return [];
@@ -186,29 +187,58 @@ async function redditToken() {
 async function fromReddit() {
   const out = [];
   const token = await redditToken();
-  const base = token ? 'https://oauth.reddit.com' : 'https://www.reddit.com';
-  const headers = { 'User-Agent': REDDIT_UA };
-  if (token) headers.Authorization = `Bearer ${token}`;
 
+  // Reddit answers 403 to the anonymous .json endpoint from most server IPs, which
+  // silently killed this source. The per-subreddit RSS feed is still served without
+  // credentials, so it is the keyless fallback; OAuth is still preferred when
+  // REDDIT_CLIENT_ID/SECRET are set, because it returns richer fields.
   await Promise.all(REDDIT_SUBS.map(async (sub) => {
     try {
-      const res = await axios.get(`${base}/r/${sub}/new.json?limit=25`, { headers, timeout: 9000 });
-      const posts = res.data?.data?.children || [];
-      for (const p of posts) {
-        const d = p.data || {};
-        const title = d.title || '';
-        // Prefer posts that point at an external tool URL and read like a launch.
-        const ext = d.url_overridden_by_dest || d.url || '';
-        if (!ext || /reddit\.com|redd\.it|imgur|youtube|youtu\.be/i.test(ext)) continue;
-        if (!looksLikeTool(`${title} ${d.selftext || ''}`)) continue;
-        out.push(norm({
-          name: title.split(/[–—\-|:]/)[0].trim().slice(0, 80),
-          tagline: title,
-          description: (d.selftext || '').slice(0, 800),
-          url: ext, source: `Reddit r/${sub}`, votes: d.ups || 0, isNew: true,
-          launchedAt: d.created_utc ? new Date(d.created_utc * 1000).toISOString() : null,
-        }));
+      if (token) {
+        const res = await axios.get(`https://oauth.reddit.com/r/${sub}/new.json?limit=25`, {
+          headers: { 'User-Agent': REDDIT_UA, Authorization: `Bearer ${token}` }, timeout: 9000,
+        });
+        for (const p of res.data?.data?.children || []) {
+          const d = p.data || {};
+          const ext = d.url_overridden_by_dest || d.url || '';
+          if (!ext || /reddit\.com|redd\.it|imgur|youtube|youtu\.be/i.test(ext)) continue;
+          if (!looksLikeTool(`${d.title} ${d.selftext || ''}`)) continue;
+          out.push(norm({
+            name: (d.title || '').split(/[–—\-|:]/)[0].trim().slice(0, 80),
+            tagline: d.title, description: (d.selftext || '').slice(0, 800),
+            url: ext, source: `Reddit r/${sub}`, votes: d.ups || 0, isNew: true,
+            launchedAt: d.created_utc ? new Date(d.created_utc * 1000).toISOString() : null,
+          }));
+        }
+        return;
       }
+
+      const res = await axios.get(`https://www.reddit.com/r/${sub}/new.rss?limit=25`, {
+        headers: HEADERS, timeout: 9000,
+      });
+      const $ = cheerio.load(res.data, { xmlMode: true });
+      $('entry').each((_, el) => {
+        const title = $(el).find('title').first().text().trim();
+        const html = $(el).find('content').first().text();
+        const body = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!title || !looksLikeTool(`${title} ${body}`)) return;
+
+        // The feed's own <link> is the comments page, and reddit.com URLs are
+        // rejected downstream — the tool's actual URL is an anchor inside content.
+        let ext = null;
+        for (const m of html.matchAll(/href="(https?:\/\/[^"]+)"/g)) {
+          const href = m[1].replace(/&amp;/g, '&');
+          if (!/reddit\.com|redd\.it|imgur|youtube|youtu\.be|\.png|\.jpg|\.gif/i.test(href)) { ext = href; break; }
+        }
+        if (!ext) return;   // self-post with no outbound link: nothing to feature
+
+        out.push(norm({
+          name: title.split(/\s+[–—|]\s+|\s+-\s+|:\s+/)[0].trim().slice(0, 80),
+          tagline: title, description: body.slice(0, 800),
+          url: ext, source: `Reddit r/${sub}`, isNew: true,
+          launchedAt: $(el).find('updated').first().text() || null,
+        }));
+      });
     } catch (e) {
       console.log(`[ToolSrc] Reddit r/${sub} failed: ${e.message}`);
     }
@@ -246,38 +276,14 @@ async function fromHuggingFace() {
   }
 }
 
-// ── 6) DIRECTORY SCRAPERS — "newly added" pages (best-effort, fragile) ─────────
-// Selectors here are intentionally broad; if a site changes layout the source just
-// returns [] and the run continues on the other sources.
-async function scrapeDirectory({ name, url, linkSelector }) {
-  try {
-    const res = await axios.get(url, { headers: HEADERS, timeout: 10000 });
-    const $ = cheerio.load(res.data);
-    const tools = [];
-    $(linkSelector).each((_, el) => {
-      const $el = $(el);
-      const toolName = $el.text().trim() || $el.attr('title') || '';
-      let href = $el.attr('href') || '';
-      if (!toolName || !href) return;
-      if (href.startsWith('/')) href = new URL(href, url).href;
-      tools.push(norm({ name: toolName.slice(0, 80), tagline: toolName, url: href, source: name, isNew: true }));
-    });
-    return tools.slice(0, 30);
-  } catch (e) {
-    console.log(`[ToolSrc] ${name} failed: ${e.message}`);
-    return [];
-  }
-}
-
-async function fromDirectories() {
-  const dirs = [
-    { name: "TheresAnAIForThat", url: 'https://theresanaiforthat.com/new/', linkSelector: 'a.ai_link, li.li a' },
-    { name: 'Futurepedia', url: 'https://www.futurepedia.io/ai-tools', linkSelector: 'a[href*="/tool/"]' },
-    { name: 'Toolify', url: 'https://www.toolify.ai/new', linkSelector: 'a[href*="/tool/"]' },
-  ];
-  const results = await Promise.allSettled(dirs.map(scrapeDirectory));
-  return results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
-}
+// ── DIRECTORY SCRAPERS — removed 2026-08-28 ───────────────────────────────────
+// TheresAnAIForThat and Toolify both sit behind Cloudflare and answer 403 to any
+// server-side request. Futurepedia still returns HTTP 200, but its markup changed
+// and the selector matches zero links — the worst kind of dead source, because a
+// healthy status code hides it. All three were costing latency on every run and
+// contributing nothing, so they are gone rather than left to look functional.
+// Replacing them would need a headless browser per directory, which is a lot of
+// runtime for listings the other sources already surface.
 
 // ── QUALITY GATE ──────────────────────────────────────────────────────────────
 // A tool is only publishable if we actually know what it does. When the script
@@ -322,7 +328,7 @@ function isAiRelevant(t) {
 
 // ── ORCHESTRATOR ──────────────────────────────────────────────────────────────
 async function gatherTools() {
-  const sources = [fromProductHunt, fromShowHN, fromGitHub, fromReddit, fromHuggingFace, fromDirectories];
+  const sources = [fromProductHunt, fromShowHN, fromGitHub, fromReddit, fromHuggingFace];
   const settled = await Promise.allSettled(sources.map((fn) => fn()));
   const all = settled.flatMap((s) => (s.status === 'fulfilled' ? s.value : []));
 
@@ -340,6 +346,14 @@ async function gatherTools() {
   console.log(`[ToolSrc] Gathered ${all.length} raw → ${clean.length} passed the quality gate`);
   console.log(`[ToolSrc] Rejected: ${rejected.noDescription} no-description, ${rejected.notAi} not-AI, ${rejected.shape} malformed`);
   console.log(`[ToolSrc] Survivors by source: ${JSON.stringify(bySource)}`);
+  // Name any source that produced nothing. Futurepedia sat in the rotation for
+  // months answering HTTP 200 with zero usable links, and nothing said so — a
+  // source that yields nothing looks identical to a quiet day unless we check.
+  const dead = sources
+    .map((fn, i) => [fn.name.replace(/^from/, ''), settled[i]])
+    .filter(([, r]) => r.status !== 'fulfilled' || !r.value.length)
+    .map(([name]) => name);
+  if (dead.length) console.log(`[ToolSrc] ⚠️ produced nothing this run: ${dead.join(', ')}`);
   if (!clean.length) console.log('[ToolSrc] ⚠️ every source failed the gate — picks will fall back to the seed pool');
   return clean;
 }
