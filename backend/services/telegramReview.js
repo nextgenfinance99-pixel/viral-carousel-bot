@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const tg = require('./telegram');
-const { getDraft, getAsset, updateAsset, publishAsset, regenerateAsset } = require('./dailyChallenge');
+const { getDraft, getAsset, updateAsset, publishAsset, regenerateAsset, postDailyStory } = require('./dailyChallenge');
 
 // Chats awaiting a free-text "what changes?" reply → { dateKey, assetId, title }
 const pendingFeedback = new Map();
@@ -54,6 +54,21 @@ async function onCallback(cb) {
   const [action, dateKey, assetId] = data.split(':');
   const asset = getAsset(dateKey, assetId);
   if (!asset) { await tg.answerCallback(cb.id, 'That draft is no longer available.'); return; }
+
+  // Story recap: 'st' renders a preview, 'sy' publishes it. Same review-first rule
+  // as every other asset — a Story is public the moment it lands.
+  if (action === 'sy') {
+    await tg.answerCallback(cb.id, 'Posting story…');
+    try {
+      const r = await postDailyStory(dateKey, { force: true });
+      await tg.sendMessage(r.ok
+        ? `📸 Story posted — covering ${r.count} post(s).`
+        : `⚠️ Story not posted: ${r.reason}`, undefined, chatId);
+    } catch (e) {
+      await tg.sendMessage(`⚠️ Story failed: ${e.message}`, undefined, chatId);
+    }
+    return;
+  }
 
   if (action === 'ap') {
     await tg.answerCallback(cb.id, 'Posting to Instagram…');
@@ -115,8 +130,24 @@ async function onMessage(msg) {
   const text = (msg.text || '').trim();
   if (!text) return;
 
+  if (text === '/story') {
+    try {
+      const r = await postDailyStory(undefined, { renderOnly: true, force: true });
+      if (!r.ok) { await tg.sendMessage(`No story: ${r.reason}`, undefined, chatId); return; }
+      const today = new Date();
+      const key = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      await tg.sendPhoto(r.filepath, `📸 Story recap — ${r.count} post(s) today. Post it?`, {
+        inline_keyboard: [[{ text: '✅ Post story', callback_data: `sy:${key}:-` }]],
+      }, chatId);
+    } catch (e) {
+      await tg.sendMessage(`⚠️ Story preview failed: ${e.message}`, undefined, chatId);
+    }
+    return;
+  }
+
   if (text === '/start' || text === '/help' || text === '/id') {
-    await tg.sendMessage(`👋 Connected! This is your DEVELOPSCHL reel review bot.\nYour chat id is <code>${chatId}</code>.\n\n• Daily drafts arrive here — tap ✅ to post, ✏️ to request changes (reply with notes), ⏭ to skip.\n• Reels are drawn from the brand template. Send a VIDEO to set the presenter clip that sits under the B-roll (photos are not used).`, undefined, chatId);
+    await tg.sendMessage(`👋 Connected! This is your DEVELOPSCHL reel review bot.\nYour chat id is <code>${chatId}</code>.\n\n• Daily drafts arrive here — tap ✅ to post, ✏️ to request changes (reply with notes), ⏭ to skip.\n• Reels are drawn from the brand template. Send a VIDEO to set the presenter clip that sits under the B-roll (photos are not used).
+• /story — preview and post a Story recapping everything posted today.`, undefined, chatId);
     return;
   }
 

@@ -25,7 +25,8 @@ const { pickFiveForToday, getChallengeStatus, todayKey, CHALLENGE_LENGTH } = req
 const { generateRundownScript, generateHowToScript, generateReelScript, generateSpotlightScript } = require('./reelScript');
 const { composeReel } = require('./reelComposer');
 const { fetchNewsArticle } = require('./newsScraper');
-const { postReel } = require('./instagram');
+const { postReel, postStory } = require('./instagram');
+const { composeStory } = require('./storyComposer');
 const youtube = require('./youtube');
 
 const DATA_DIR = path.join(__dirname, '../data');
@@ -267,4 +268,44 @@ async function regenerateAsset(dateKey, assetId, feedback) {
   });
 }
 
-module.exports = { generateDailyBundle, getDraft, listDrafts, getChallengeStatus, updateAsset, getAsset, publishAsset, regenerateAsset };
+/**
+ * Post a Story recapping everything that actually went out today.
+ *
+ * Driven by asset.posted, not by what was generated or approved: a Story claiming
+ * posts that failed to publish is worse than no Story, and this is the one surface
+ * where the daily cadence is visible on the profile.
+ *
+ * Safe to call more than once a day — it records storyPostedAt on the draft and
+ * refuses to publish a second recap unless forced.
+ */
+async function postDailyStory(dateKey = todayKey(), opts = {}) {
+  const draft = getDraft(dateKey);
+  if (!draft) return { ok: false, reason: 'no draft for that date' };
+
+  if (draft.storyPostedAt && !opts.force) {
+    return { ok: false, reason: `story already posted at ${draft.storyPostedAt}` };
+  }
+
+  const posted = (draft.assets || []).filter((a) => a.posted);
+  if (!posted.length) return { ok: false, reason: 'nothing was posted today' };
+
+  const story = await composeStory(
+    posted.map((a) => ({ kind: a.kind, title: a.title, toolName: a.toolName })),
+    { day: draft.day, length: draft.challengeLength }
+  );
+  if (!story) return { ok: false, reason: 'story render produced nothing' };
+
+  if (opts.renderOnly) return { ok: true, rendered: true, filepath: story.filepath, count: story.count };
+
+  const id = await postStory(story.filepath);
+  const all = loadDrafts();
+  if (all[dateKey]) {
+    all[dateKey].storyPostedAt = new Date().toISOString();
+    all[dateKey].storyMediaId = id;
+    saveDrafts(all);
+  }
+  console.log(`[Daily] Story posted for ${dateKey} covering ${story.count} post(s)`);
+  return { ok: true, id, count: story.count };
+}
+
+module.exports = { generateDailyBundle, postDailyStory, getDraft, listDrafts, getChallengeStatus, updateAsset, getAsset, publishAsset, regenerateAsset };

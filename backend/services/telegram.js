@@ -45,6 +45,21 @@ async function sendVideo(videoPath, caption, replyMarkup, chatId = CHAT_ID()) {
   return res.data.result;
 }
 
+// Send a still. Used for the daily Story preview, which is a PNG rather than video.
+async function sendPhoto(photoPath, caption, replyMarkup, chatId = CHAT_ID()) {
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  if (caption) { form.append('caption', caption.slice(0, 1024)); form.append('parse_mode', 'HTML'); }
+  if (replyMarkup) form.append('reply_markup', JSON.stringify(replyMarkup));
+  form.append('photo', fs.createReadStream(photoPath));
+  const res = await axios.post(`${API()}/sendPhoto`, form, {
+    headers: form.getHeaders(), timeout: 60000,
+    maxBodyLength: Infinity, maxContentLength: Infinity,
+  });
+  if (!res.data.ok) throw new Error(`Telegram sendPhoto: ${res.data.description}`);
+  return res.data.result;
+}
+
 // Download a Telegram file (e.g. a photo the user sent) to a local path.
 async function downloadFile(fileId, destPath) {
   const f = await call('getFile', { file_id: fileId });
@@ -108,4 +123,4 @@ async function startPolling({ onCallback, onMessage }) {
 
 function stopPolling() { polling = false; }
 
-module.exports = { isConfigured, sendMessage, sendVideo, downloadFile, answerCallback, editCaption, startPolling, stopPolling, CHAT_ID };
+module.exports = { isConfigured, sendMessage, sendVideo, sendPhoto, downloadFile, answerCallback, editCaption, startPolling, stopPolling, CHAT_ID };

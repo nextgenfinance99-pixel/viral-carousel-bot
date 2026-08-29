@@ -208,4 +208,29 @@ async function postReel(videoPath, caption) {
   return postId;
 }
 
-module.exports = { postCarousel, postReel };
+/**
+ * Post an image Story.
+ *
+ * Stories take a still directly — no transcode, so unlike REELS there is nothing to
+ * poll and the whole call is one create + one publish. Story containers still expire
+ * after 24h like any other, but we publish immediately.
+ */
+async function postStory(imagePath) {
+  const { accessToken, userId } = getCredentials();
+  const imageUrl = await uploadFileToHost(imagePath);
+
+  let create;
+  try {
+    create = await axios.post(`${BASE_URL}/${userId}/media`, null, {
+      params: { media_type: 'STORIES', image_url: imageUrl, access_token: accessToken },
+    });
+  } catch (e) {
+    throw apiError(e, 'Creating story container failed');
+  }
+
+  const postId = await publishMedia(create.data.id);
+  console.log(`[Instagram] Published Story: ${postId}`);
+  return postId;
+}
+
+module.exports = { postCarousel, postReel, postStory };
