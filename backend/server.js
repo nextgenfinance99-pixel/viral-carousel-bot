@@ -86,6 +86,32 @@ if (process.env.DAILY_AUTOGEN === 'true') {
     }
   }, tz ? { timezone: tz } : {});
   console.log(`[Daily] Auto-generate ON — schedule: ${dailyCron} (tz: ${tz || 'server local'}), review-only (no auto-post).`);
+
+  // CATCH-UP. node-cron only fires while the process is alive, so on a laptop that
+  // was asleep or shut down at the scheduled time the day is simply lost — and the
+  // whole premise is a daily cadence. On boot, if today has no draft yet, build one.
+  //
+  // Deliberately not a "missed run" queue: only ever one draft for today, never a
+  // backlog of old days nobody wants to post. generateDailyBundle is already
+  // idempotent per date, so a restart mid-morning cannot produce a second draft.
+  setTimeout(async () => {
+    try {
+      const { getDraft } = require('./services/dailyChallenge');
+      const { todayKey } = require('./services/toolStore');
+      const key = todayKey();
+      const existing = getDraft(key);
+      if (existing && existing.status === 'ready') {
+        console.log(`[Daily] Catch-up: draft for ${key} already exists — nothing to do.`);
+        return;
+      }
+      console.log(`[Daily] Catch-up: no draft for ${key} yet — building one now.`);
+      await ingest();
+      const draft = await generateDailyBundle({ force: false });
+      if (telegramReview.isOn()) await telegramReview.pushDraft(draft);
+    } catch (e) {
+      console.error('[Daily] Catch-up run failed:', e.message);
+    }
+  }, 20000);   // let the server settle and Telegram connect first
 } else {
   console.log('[Daily] Auto-generate OFF (set DAILY_AUTOGEN=true to build a draft each morning).');
 }
