@@ -15,7 +15,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { gatherTools, classifyCategory, isPublishable } = require('./toolSources');
+const { gatherTools, classifyCategory, isPublishable, isBrandSafe } = require('./toolSources');
 
 const DATA_DIR = path.join(__dirname, '../data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -73,7 +73,9 @@ async function ingest() {
   // would otherwise stay in the pool and keep getting picked. Tools already used
   // are kept so the Day N history and dedupe stay intact.
   const before = store.tools.length;
-  store.tools = store.tools.filter((t) => t.usedAt || t.fromPool || isPublishable(t));
+  // usedAt normally exempts a record so day history and dedupe survive, but that
+  // exemption must not keep an unsafe tool alive in the pool — brand safety wins.
+  store.tools = store.tools.filter((t) => isBrandSafe(t) && (t.usedAt || t.fromPool || isPublishable(t)));
   const pruned = before - store.tools.length;
   if (pruned) console.log(`[ToolStore] Pruned ${pruned} unpublishable tools already in the store`);
   try {

@@ -322,6 +322,33 @@ const AI_TERMS = new RegExp(
   ].join('|') + ')\\b', 'i'
 );
 
+// Brand safety. The gate checked that a tool was describable and AI-related, but
+// not whether it belongs on a public brand account — and "Pornmaster Krea2" reached
+// the daily pick list. Sources like Hugging Face and Reddit surface adult content
+// freely, so this has to be filtered here rather than hoped away.
+//
+// Two term classes, because a single unbounded list over-blocks: the GitHub user
+// "ValerianXXX" tripped a bare "xxx" and knocked out a legitimate job-search tool.
+// STRONG terms are unambiguous enough to match anywhere, including inside a URL
+// slug. WEAK terms are real words that appear inside innocent ones, so they need a
+// word boundary and are not matched against the URL at all, where handles are noise.
+const UNSAFE_STRONG = new RegExp('(' + [
+  'porn', 'hentai', 'nudify', 'deepnude', 'onlyfans', 'camgirl', 'nsfw',
+  'undress', 'sexchat', 'sexbot', 'ai[- ]?girlfriend', 'girlfriend[- ]?bot',
+].join('|') + ')', 'i');
+
+const UNSAFE_WEAK = new RegExp('\b(' + [
+  'xxx', 'nude', 'nudes', 'erotic', 'fetish', 'escort', 'lewd',
+  'boobs', 'genital', 'gore', 'beheading',
+  'keygen', 'pirated', 'cracked licence', 'cracked license',
+].join('|') + ')\b', 'i');
+
+function isBrandSafe(t) {
+  const text = `${t.name} ${t.tagline} ${t.description}`;
+  if (UNSAFE_STRONG.test(`${text} ${t.url}`)) return false;
+  return !UNSAFE_WEAK.test(text);
+}
+
 function isAiRelevant(t) {
   return AI_TERMS.test(`${t.name} ${t.tagline} ${t.description}`);
 }
@@ -332,11 +359,12 @@ async function gatherTools() {
   const settled = await Promise.allSettled(sources.map((fn) => fn()));
   const all = settled.flatMap((s) => (s.status === 'fulfilled' ? s.value : []));
 
-  const rejected = { shape: 0, noDescription: 0, notAi: 0 };
+  const rejected = { shape: 0, noDescription: 0, notAi: 0, unsafe: 0 };
   const clean = all.filter((t) => {
     if (!t.name || !t.url || t.name.length <= 1) { rejected.shape++; return false; }
     if (!hasRealDescription(t)) { rejected.noDescription++; return false; }
     if (!isAiRelevant(t)) { rejected.notAi++; return false; }
+    if (!isBrandSafe(t)) { rejected.unsafe++; return false; }
     return true;
   });
 
@@ -344,7 +372,7 @@ async function gatherTools() {
   // slugs again) is visible in the daily run instead of silently degrading picks.
   const bySource = clean.reduce((acc, t) => { acc[t.source] = (acc[t.source] || 0) + 1; return acc; }, {});
   console.log(`[ToolSrc] Gathered ${all.length} raw → ${clean.length} passed the quality gate`);
-  console.log(`[ToolSrc] Rejected: ${rejected.noDescription} no-description, ${rejected.notAi} not-AI, ${rejected.shape} malformed`);
+  console.log(`[ToolSrc] Rejected: ${rejected.noDescription} no-description, ${rejected.notAi} not-AI, ${rejected.unsafe} unsafe, ${rejected.shape} malformed`);
   console.log(`[ToolSrc] Survivors by source: ${JSON.stringify(bySource)}`);
   // Name any source that produced nothing. Futurepedia sat in the rotation for
   // months answering HTTP 200 with zero usable links, and nothing said so — a
@@ -361,7 +389,7 @@ async function gatherTools() {
 // isPublishable is exported so the store can re-apply the gate to records that
 // were ingested before it existed, instead of serving them forever.
 function isPublishable(t) {
-  return !!(t && t.name && t.url && t.name.length > 1 && hasRealDescription(t) && isAiRelevant(t));
+  return !!(t && t.name && t.url && t.name.length > 1 && hasRealDescription(t) && isAiRelevant(t) && isBrandSafe(t));
 }
 
-module.exports = { gatherTools, classifyCategory, isPublishable, hasRealDescription, isAiRelevant };
+module.exports = { gatherTools, classifyCategory, isPublishable, hasRealDescription, isAiRelevant, isBrandSafe };
