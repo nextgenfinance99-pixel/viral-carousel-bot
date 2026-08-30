@@ -79,10 +79,16 @@ four days because the prompt asked politely.
 
 ## Open / not done
 
-- **Hosting.** Backend only runs while the laptop is on. Options discussed: laptop
-  auto-start (free, scheduled task command in chat), Oracle Cloud Always Free (free
-  forever, ARM, needs arm64 image), Render Starter (~$7.50/mo, `render.yaml` ready).
-  User is not monetising yet and prefers free.
+- **Hosting.** Backend currently runs only while the laptop is on, launched by
+  `run-backend-hidden.vbs` (detached; survives closing the terminal; refuses to
+  start a second copy). Options, best first:
+  1. **The user's existing Hetzner box** — they already run a "hermes agent" there,
+     so marginal cost is zero and it is 24/7. This is the intended target.
+     `backend/Dockerfile` already builds everything needed (Node, FFmpeg, fonts,
+     Chromium). NOT yet deployed.
+  2. Oracle Cloud Always Free (free forever, ARM — needs an arm64 build).
+  3. Render Starter ~$7.50/mo, `render.yaml` ready. Rejected: not monetising yet.
+  Windows logon task was NOT registered — the command is in chat for the user to run.
 - **PR not opened.** `gh` is not installed. Branch pushed; open at
   `https://github.com/nextgenfinance99-pixel/viral-carousel-bot/compare/main...reel-pipeline-overhaul`
 - **`postStory` untested against the live API.** All read-only checks pass.
